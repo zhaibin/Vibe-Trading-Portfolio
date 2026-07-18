@@ -10,11 +10,13 @@ This file is last-known evidence, not a substitute for inspecting the repository
 
 ## Last-known repository state
 
-The following was known when this handoff was written and is not a claim about the live checkout:
+The following state was verified after local integration on 2026-07-19. It remains last-known evidence rather than a substitute for inspecting the live checkout:
 
 - Target/integration branch: `main`
-- Active handoff branch: `docs/new-session-handoff`
-- Branch base: `fb1e81e` (`docs: plan new-session handoff`)
+- Last verified active branch: `main`
+- Integrated handoff branch: `docs/new-session-handoff`
+- Handoff branch base: `fb1e81e` (`docs: plan new-session handoff`)
+- Handoff implementation commits: `0bbe561` (`docs: add new-session handoff`) and `16446c3` (`docs: clarify handoff approval gate`)
 - Milestone 0 implementation head: `3b8e502` (`fix: reject pre-open token path replacement`)
 - Handoff design commit: `9d4dfd5` (`docs: design new-session handoff`)
 - Plan commit: `fb1e81e` (`docs: plan new-session handoff`)
@@ -41,7 +43,7 @@ Milestone 0 established the external integration boundary:
 - diagnostic system API and machine-readable compatibility CLI;
 - pinned compatibility baseline, minimum/stable/latest CI matrix, layered route/runtime/MCP gates, and an 85% coverage threshold.
 
-The last hermetic verification associated with Milestone 0 reported 123 passed, 3 deselected, 90.24% coverage, clean Ruff, strict mypy, and lock checks. Treat these counts as historical evidence and rerun the gate before relying on them.
+The latest hermetic verification after local integration reported 123 passed, 3 deselected, 90.24% coverage, clean Ruff, strict mypy, and lock checks. Treat these counts as historical evidence and rerun the gate before relying on them.
 
 ## Explicitly not implemented
 
