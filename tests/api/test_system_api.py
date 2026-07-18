@@ -26,6 +26,17 @@ class FakeDiscovery:
         )
 
 
+class FailingAfterAvailabilityDiscovery(FakeDiscovery):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = False
+
+    async def discover(self, mcp_status: McpStatus = McpStatus.NOT_CHECKED) -> CompatibilityReport:
+        if self.fail:
+            raise RuntimeError("upstream_api_key=must-not-leak")
+        return await super().discover(mcp_status)
+
+
 class FakeProbe:
     def __init__(self) -> None:
         self.calls = 0
@@ -180,3 +191,31 @@ async def test_concurrent_probe_requests_are_serialized_and_preserve_request_ord
     assert first.json()["probe"]["status"] == "available"
     assert second.json()["probe"]["status"] == "failed"
     assert status.json()["mcp_status"] == "failed"
+
+
+def test_get_discovery_failure_invalidates_cached_availability_without_running_probe() -> None:
+    discovery = FailingAfterAvailabilityDiscovery()
+    probe = FakeProbe()
+    app = create_app(AppServices(discovery=discovery, mcp_probe=probe))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        available = client.post("/api/v1/system/compatibility/mcp-probe")
+        discovery.fail = True
+        failed = client.get("/api/v1/system/compatibility")
+        status = client.get("/api/v1/system/status")
+        repeated = client.get("/api/v1/system/compatibility")
+
+    assert available.status_code == 200
+    assert available.json()["compatibility"]["analysis_mode"] == "full_mcp"
+    assert failed.status_code == 200
+    assert failed.json()["state"] == "degraded"
+    assert failed.json()["analysis_mode"] == "disabled"
+    assert failed.json()["contract_compatible"] is False
+    assert failed.json()["deep_analysis_enabled"] is False
+    assert failed.json()["mcp_status"] == "failed"
+    assert failed.json()["reasons"] == ["compatibility_discovery_failed"]
+    assert "must-not-leak" not in failed.text
+    assert status.json()["mcp_status"] == "failed"
+    assert repeated.json()["analysis_mode"] != "full_mcp"
+    assert repeated.json()["mcp_status"] == "failed"
+    assert probe.calls == 1

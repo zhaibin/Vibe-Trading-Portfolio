@@ -45,6 +45,17 @@ class ProbeFailureResponse(BaseModel):
     compatibility: CompatibilityReport
 
 
+def _failed_compatibility_report(reason: str) -> CompatibilityReport:
+    return CompatibilityReport(
+        state=CompatibilityState.DEGRADED,
+        analysis_mode=AnalysisMode.DISABLED,
+        contract_compatible=False,
+        deep_analysis_enabled=False,
+        mcp_status=McpStatus.FAILED,
+        reasons=[reason],
+    )
+
+
 @dataclass(slots=True)
 class AppServices:
     discovery: DiscoveryPort
@@ -94,8 +105,14 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     @app.get("/api/v1/system/compatibility", response_model=CompatibilityReport)
     async def compatibility(request: Request) -> CompatibilityReport:
         active_services: AppServices = request.app.state.services
-        mcp_status: McpStatus = request.app.state.mcp_status
-        return await active_services.discovery.discover(mcp_status)
+        lock: asyncio.Lock = request.app.state._mcp_probe_lock
+        async with lock:
+            mcp_status: McpStatus = request.app.state.mcp_status
+            try:
+                return await active_services.discovery.discover(mcp_status)
+            except Exception:
+                request.app.state.mcp_status = McpStatus.FAILED
+                return _failed_compatibility_report("compatibility_discovery_failed")
 
     @app.post(
         "/api/v1/system/compatibility/mcp-probe",
@@ -115,14 +132,7 @@ def create_app(services: AppServices | None = None) -> FastAPI:
                 try:
                     report = await active_services.discovery.discover(McpStatus.FAILED)
                 except Exception:
-                    report = CompatibilityReport(
-                        state=CompatibilityState.DEGRADED,
-                        analysis_mode=AnalysisMode.DISABLED,
-                        contract_compatible=False,
-                        deep_analysis_enabled=False,
-                        mcp_status=McpStatus.FAILED,
-                        reasons=["mcp_probe_failed"],
-                    )
+                    report = _failed_compatibility_report("mcp_probe_failed")
                 failure = ProbeFailureResponse(
                     error=ProbeError(),
                     probe=FailedProbe(),
