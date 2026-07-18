@@ -1,4 +1,5 @@
 import asyncio
+import os
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -162,6 +163,28 @@ def test_token_reader_accepts_only_an_owner_only_regular_file(tmp_path: Path) ->
     token_file.chmod(0o600)
 
     assert _read_token(token_file) == "dedicated-token"
+
+
+def test_token_reader_rejects_path_replaced_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_file = tmp_path / "mcp-token"
+    token_file.write_text("original-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    replacement = tmp_path / "replacement-token"
+    replacement.write_text("replacement-token\n", encoding="utf-8")
+    replacement.chmod(0o600)
+    real_open = os.open
+
+    def replace_then_open(path: Path, flags: int) -> int:
+        replacement.replace(token_file)
+        return real_open(path, flags)
+
+    monkeypatch.setattr(os, "open", replace_then_open)
+
+    with pytest.raises(ValueError, match="stable regular file"):
+        _read_token(token_file)
 
 
 def test_token_reader_rejects_group_or_other_permission_bits(tmp_path: Path) -> None:

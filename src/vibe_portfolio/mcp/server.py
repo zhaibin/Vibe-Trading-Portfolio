@@ -62,7 +62,10 @@ def _read_token(path: Path) -> str:
     try:
         opened = os.fstat(descriptor)
         after_open = os.lstat(path)
-        same_file = (opened.st_dev, opened.st_ino) == (after_open.st_dev, after_open.st_ino)
+        opened_identity = (opened.st_dev, opened.st_ino)
+        same_file = opened_identity == (before_open.st_dev, before_open.st_ino) and (
+            opened_identity == (after_open.st_dev, after_open.st_ino)
+        )
         if not stat.S_ISREG(opened.st_mode) or not same_file:
             raise ValueError(f"Portfolio MCP token path must be a stable regular file: {path}")
         if stat.S_IMODE(opened.st_mode) & (stat.S_IRWXG | stat.S_IRWXO):
