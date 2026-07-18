@@ -13,7 +13,7 @@ Before doing any work, read this file completely and then read [`docs/handoff/CU
 3. Compare live Git state with the last-known evidence in `CURRENT.md`; report any drift.
 4. Read only the authoritative documents and source areas relevant to the requested next step.
 5. Report the understood state, constraints, risks, and recommended next step to the user.
-6. wait for explicit user approval before modifying code or starting the next milestone.
+6. Before modifying any repository file or starting milestone work, wait for explicit user approval.
 
 Do not infer approval from a previous session's plans or from `CURRENT.md`.
 
@@ -63,4 +63,4 @@ Follow [`docs/runbooks/vibe-compatibility.md`](docs/runbooks/vibe-compatibility.
 
 ## End-of-session handoff
 
-After material approved work, update `docs/handoff/CURRENT.md` with verified capabilities, remaining scope, decisions, blockers, next recommended step, branch, relevant commits, remote state, and actual verification results. Update this file only when stable governance or required workflow changes. Never record secrets or personal portfolio data.
+After material approved work, update `docs/handoff/CURRENT.md` with verified capabilities, remaining scope, decisions, blockers, next recommended step, branch, relevant commits, remote state, and actual verification results. Update `AGENTS.md` only when stable governance or required workflow changes. Never record secrets or personal portfolio data.

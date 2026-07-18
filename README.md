@@ -6,7 +6,7 @@ Milestone 0 proves only the external integration boundary: Vibe version/capabili
 
 ## New session handoff
 
-Agents and maintainers should start with [`AGENTS.md`](AGENTS.md) and the current [`docs/handoff/CURRENT.md`](docs/handoff/CURRENT.md). A new session must verify the live Git state, report its understanding and recommended next step, and wait for user approval before continuing milestone work.
+Agents and maintainers should start with [`AGENTS.md`](AGENTS.md) and the current [`docs/handoff/CURRENT.md`](docs/handoff/CURRENT.md). A new session must verify the live Git state and report its understanding and recommended next step. Before modifying any repository file or starting milestone work, wait for explicit user approval.
 
 ## Local setup
 

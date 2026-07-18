@@ -6,14 +6,19 @@
 
 ## Start here
 
-This file is last-known evidence, not a substitute for inspecting the repository. A new session must first follow the startup protocol in [`AGENTS.md`](../../AGENTS.md), compare this handoff with live Git state, report its understanding and proposed next step, and wait for user approval before modifying code.
+This file is last-known evidence, not a substitute for inspecting the repository. A new session must first follow the startup protocol in [`AGENTS.md`](../../AGENTS.md), compare this handoff with live Git state, and report its understanding and proposed next step. Before modifying any repository file or starting milestone work, wait for explicit user approval.
 
 ## Last-known repository state
 
-- Branch: `main`
+The following was known when this handoff was written and is not a claim about the live checkout:
+
+- Target/integration branch: `main`
+- Active handoff branch: `docs/new-session-handoff`
+- Branch base: `fb1e81e` (`docs: plan new-session handoff`)
 - Milestone 0 implementation head: `3b8e502` (`fix: reject pre-open token path replacement`)
 - Handoff design commit: `9d4dfd5` (`docs: design new-session handoff`)
-- Remote: none configured at the time of this update
+- Plan commit: `fb1e81e` (`docs: plan new-session handoff`)
+- Remote: none configured at the time this handoff was written
 - Upstream Vibe baseline: `0.1.11` at `67a393e4574865e8ab9b1b3f9a9fd1d7ab337343`
 - Supported Vibe range: `>=0.1.11,<0.2.0`
 
@@ -87,9 +92,13 @@ The route-only, live runtime, and full MCP commands are intentionally documented
 - No live Vibe runtime or operator MCP result should be inferred from the hermetic suite.
 - The next milestone must define privacy, retention, precision, currency, and migration rules before storing personal holdings.
 
+## Current blockers
+
+Current blockers: none known. External dependencies and decisions remain user approval to create and push a remote, if desired, and user approval for the future holdings-domain design before that milestone begins.
+
 ## Recommended next step
 
-Propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. The design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe. Do not begin implementation from this recommendation alone.
+Propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. The design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe. Before modifying any repository file or starting milestone work, wait for explicit user approval.
 
 ## End-of-session update checklist
 
