@@ -1,8 +1,19 @@
+import asyncio
+from collections.abc import AsyncIterator
+
+import pytest
+
 from vibe_portfolio.compatibility import McpStatus
 from vibe_portfolio.vibe.mcp_probe import EXPECTED_VIBE_TOOL_NAME, PortfolioMcpProbe
-from vibe_portfolio.vibe.models import CancelResult, GoalSnapshot, MessageAccepted, SessionRecord
+from vibe_portfolio.vibe.models import (
+    CancelResult,
+    GoalSnapshot,
+    MessageAccepted,
+    MessageRecord,
+    SessionRecord,
+)
 from vibe_portfolio.vibe.sse import SseEvent
-from vibe_portfolio.vibe.watcher import AttemptOutcome, AttemptStatus
+from vibe_portfolio.vibe.watcher import AttemptOutcome, AttemptStatus, AttemptWatcher
 
 
 class FakeGateway:
@@ -45,6 +56,64 @@ class FakeWatcher:
     async def wait(self, session_id: str, attempt_id: str) -> AttemptOutcome:
         self.calls.append((session_id, attempt_id))
         return self.outcome
+
+
+class FailingWatcher:
+    async def wait(self, session_id: str, attempt_id: str) -> AttemptOutcome:
+        raise RuntimeError("watcher failed")
+
+
+class BlockingWatcher:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+
+    async def wait(self, session_id: str, attempt_id: str) -> AttemptOutcome:
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class CancelFailingGateway(FakeGateway):
+    async def cancel(self, session_id: str) -> CancelResult:
+        self.cancelled.append(session_id)
+        raise RuntimeError("cancel failed")
+
+
+class PollingProbeGateway(FakeGateway):
+    def __init__(self, metadata: dict[str, str] | None) -> None:
+        super().__init__()
+        self.metadata = metadata
+
+    async def stream_events(
+        self, session_id: str, last_event_id: str | None = None
+    ) -> AsyncIterator[SseEvent]:
+        yield SseEvent(
+            "e1",
+            "tool_call",
+            {"attempt_id": "attempt-1", "tool": EXPECTED_VIBE_TOOL_NAME},
+        )
+        yield SseEvent(
+            "e2",
+            "tool_result",
+            {
+                "attempt_id": "attempt-1",
+                "tool": EXPECTED_VIBE_TOOL_NAME,
+                "status": "ok",
+            },
+        )
+
+    async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
+        return [
+            MessageRecord(
+                message_id="assistant-1",
+                session_id=session_id,
+                role="assistant",
+                content="done",
+                created_at="2026-07-18T00:00:01Z",
+                linked_attempt_id="attempt-1",
+                metadata=self.metadata,
+            )
+        ]
 
 
 def outcome_with(
@@ -91,6 +160,25 @@ async def test_probe_requires_observed_successful_tool_call_and_result() -> None
     assert "mcpServers" not in gateway.messages[0][1]
 
 
+@pytest.mark.parametrize("metadata", [{}, {"status": "unknown"}])
+async def test_probe_cannot_be_available_without_a_known_terminal_poll_status(
+    metadata: dict[str, str],
+) -> None:
+    gateway = PollingProbeGateway(metadata)
+    watcher = AttemptWatcher(
+        gateway,
+        max_reconnects=0,
+        poll_interval_seconds=0,
+        timeout_seconds=1,
+    )
+
+    result = await PortfolioMcpProbe(gateway, watcher).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == "probe_attempt_failed"
+    assert gateway.cancelled == ["session-1"]
+
+
 async def test_completed_run_without_tool_event_is_missing_not_success() -> None:
     gateway = FakeGateway()
     watcher = FakeWatcher(
@@ -111,6 +199,39 @@ async def test_timed_out_probe_cancels_original_session() -> None:
 
     assert result.status is McpStatus.FAILED
     assert result.reason == "probe_timed_out"
+    assert gateway.cancelled == ["session-1"]
+
+
+async def test_watcher_exception_cancels_original_session_without_hiding_failure() -> None:
+    gateway = FakeGateway()
+
+    with pytest.raises(RuntimeError, match="watcher failed"):
+        await PortfolioMcpProbe(gateway, FailingWatcher()).run()
+
+    assert gateway.cancelled == ["session-1"]
+
+
+async def test_cancel_failure_does_not_replace_the_primary_probe_failure() -> None:
+    gateway = CancelFailingGateway()
+    watcher = FakeWatcher(outcome_with(status=AttemptStatus.TIMED_OUT))
+
+    result = await PortfolioMcpProbe(gateway, watcher).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == "probe_timed_out"
+    assert gateway.cancelled == ["session-1"]
+
+
+async def test_task_cancellation_cleans_up_once_and_preserves_cancelled_error() -> None:
+    gateway = FakeGateway()
+    watcher = BlockingWatcher()
+    task = asyncio.create_task(PortfolioMcpProbe(gateway, watcher).run())
+    await watcher.entered.wait()
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert gateway.cancelled == ["session-1"]
 
 
@@ -352,10 +473,12 @@ async def test_watcher_outcome_session_mismatch_fails_closed() -> None:
     )
     outcome = outcome_with(*events, session_id="session-other")
 
-    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome)).run()
+    gateway = FakeGateway()
+    result = await PortfolioMcpProbe(gateway, FakeWatcher(outcome)).run()
 
     assert result.status is McpStatus.FAILED
     assert result.reason == "probe_outcome_session_mismatch"
+    assert gateway.cancelled == ["session-1"]
 
 
 async def test_watcher_outcome_attempt_mismatch_fails_closed() -> None:
@@ -378,10 +501,12 @@ async def test_watcher_outcome_attempt_mismatch_fails_closed() -> None:
     )
     outcome = outcome_with(*events, attempt_id="attempt-other")
 
-    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome)).run()
+    gateway = FakeGateway()
+    result = await PortfolioMcpProbe(gateway, FakeWatcher(outcome)).run()
 
     assert result.status is McpStatus.FAILED
     assert result.reason == "probe_outcome_attempt_mismatch"
+    assert gateway.cancelled == ["session-1"]
 
 
 class MissingGoalGateway(FakeGateway):
@@ -408,3 +533,4 @@ async def test_invalid_goal_id_stops_before_message_submission() -> None:
             raise AssertionError("Expected invalid goal_id to fail closed")
 
         assert gateway.messages == []
+        assert gateway.cancelled == ["session-1"]

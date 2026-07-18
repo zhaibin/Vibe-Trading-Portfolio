@@ -100,7 +100,8 @@ class CompatibilityDiscovery:
         missing = [
             capability
             for capability, method, path in REQUIRED_ENDPOINTS
-            if not isinstance(paths.get(path), dict) or method.lower() not in paths[path]
+            if not isinstance(paths.get(path), dict)
+            or not isinstance(paths[path].get(method.lower()), dict)
         ]
 
         if not version_supported or missing:

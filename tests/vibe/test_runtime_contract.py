@@ -88,9 +88,15 @@ class FakeRuntimeGateway:
         self.stream_calls.append((session_id, last_event_id))
         self._fail("sse")
         if last_event_id is None:
-            yield SseEvent("event-1", "message.received", {"message_id": "message-1"})
+            yield SseEvent(
+                "event-message",
+                "message.received",
+                {"message_id": "message-1", "role": "user"},
+            )
+            yield SseEvent("event-created", "attempt.created", {"attempt_id": "attempt-1"})
+            yield SseEvent("event-started", "attempt.started", {"attempt_id": "attempt-1"})
         else:
-            yield SseEvent("event-2", "attempt.created", {"attempt_id": "attempt-1"})
+            yield SseEvent("event-started", "attempt.started", {"attempt_id": "attempt-1"})
 
     async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
         self._fail("poll")
@@ -108,6 +114,46 @@ class FakeRuntimeGateway:
         self.cancel_calls.append(session_id)
         self._fail("cancel")
         return CancelResult(status="cancelled")
+
+
+class ArbitraryEventRuntimeGateway(FakeRuntimeGateway):
+    async def stream_events(
+        self, session_id: str, last_event_id: str | None = None
+    ) -> AsyncIterator[SseEvent]:
+        self.stream_calls.append((session_id, last_event_id))
+        if last_event_id is None:
+            yield SseEvent("unrelated-1", "tool_call", {"attempt_id": "attempt-other"})
+        else:
+            yield SseEvent("unrelated-2", "text_delta", {"attempt_id": "attempt-other"})
+
+
+class UnprovenNoActiveLoopGateway(FakeRuntimeGateway):
+    async def cancel(self, session_id: str) -> CancelResult:
+        self.cancel_calls.append(session_id)
+        return CancelResult(status="no_active_loop")
+
+
+class TerminalNoActiveLoopGateway(UnprovenNoActiveLoopGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.poll_calls = 0
+
+    async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
+        self.poll_calls += 1
+        messages = await super().list_messages(session_id, limit)
+        if self.poll_calls > 1:
+            messages.append(
+                MessageRecord(
+                    message_id="assistant-1",
+                    session_id=session_id,
+                    role="assistant",
+                    content="done",
+                    created_at="2026-07-18T00:00:02Z",
+                    linked_attempt_id="attempt-1",
+                    metadata={"status": "completed"},
+                )
+            )
+        return messages
 
 
 async def no_sleep(_: float) -> None:
@@ -129,9 +175,52 @@ async def test_runtime_contract_exercises_every_public_runtime_path() -> None:
     assert result.stage == "complete"
     assert result.session_id == "session-1"
     assert result.attempt_id == "attempt-1"
-    assert gateway.stream_calls == [("session-1", None), ("session-1", "event-1")]
+    assert gateway.stream_calls == [("session-1", None), ("session-1", "event-created")]
     assert gateway.cancel_calls == ["session-1"]
     assert gate_exit_code(result) == 0
+
+
+async def test_arbitrary_distinct_sse_events_cannot_satisfy_attempt_identity_or_replay() -> None:
+    result = await RuntimeContractVerifier(
+        ArbitraryEventRuntimeGateway(),
+        FakeDiscovery(),
+        stream_warmup_seconds=0,
+        event_timeout_seconds=0.05,
+        sleep=no_sleep,
+    ).verify()
+
+    assert result.passed is False
+    assert result.stage in {"sse", "sse_replay"}
+
+
+async def test_no_active_loop_requires_exact_terminal_proof_for_original_attempt() -> None:
+    result = await RuntimeContractVerifier(
+        UnprovenNoActiveLoopGateway(),
+        FakeDiscovery(),
+        stream_warmup_seconds=0,
+        event_timeout_seconds=0.05,
+        sleep=no_sleep,
+    ).verify()
+
+    assert result.passed is False
+    assert result.stage == "cancel"
+    assert result.reason == "cancel_not_proven_for_attempt"
+
+
+async def test_no_active_loop_passes_with_exact_terminal_proof_for_original_attempt() -> None:
+    gateway = TerminalNoActiveLoopGateway()
+
+    result = await RuntimeContractVerifier(
+        gateway,
+        FakeDiscovery(),
+        stream_warmup_seconds=0,
+        event_timeout_seconds=0.05,
+        sleep=no_sleep,
+    ).verify()
+
+    assert result.passed is True
+    assert gateway.cancel_calls == ["session-1"]
+    assert gateway.poll_calls == 2
 
 
 @pytest.mark.parametrize("fail_at", ["session", "goal", "message", "ticket", "sse", "poll", "cancel"])

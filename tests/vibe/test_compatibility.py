@@ -110,6 +110,36 @@ async def test_missing_one_method_on_shared_messages_path_fails_closed() -> None
     assert report.missing_capabilities == ["messages.poll"]
 
 
+@pytest.mark.parametrize("malformed_path_item", [None, "post", [], 7])
+async def test_malformed_required_openapi_path_item_fails_closed(
+    malformed_path_item: object,
+) -> None:
+    paths = required_paths()
+    paths["/sessions"] = malformed_path_item
+
+    report = await CompatibilityDiscovery(FakeGateway(paths=paths)).discover(McpStatus.AVAILABLE)
+
+    assert report.state is CompatibilityState.UNSUPPORTED
+    assert report.analysis_mode is AnalysisMode.DISABLED
+    assert report.contract_compatible is False
+    assert "sessions.create" in report.missing_capabilities
+
+
+@pytest.mark.parametrize("malformed_operation", [None, "operation", [], 7])
+async def test_malformed_required_openapi_operation_fails_closed(
+    malformed_operation: object,
+) -> None:
+    paths = required_paths()
+    paths["/sessions"]["post"] = malformed_operation
+
+    report = await CompatibilityDiscovery(FakeGateway(paths=paths)).discover(McpStatus.AVAILABLE)
+
+    assert report.state is CompatibilityState.UNSUPPORTED
+    assert report.analysis_mode is AnalysisMode.DISABLED
+    assert report.contract_compatible is False
+    assert "sessions.create" in report.missing_capabilities
+
+
 async def test_failed_mcp_probe_has_an_explicit_bounded_context_reason() -> None:
     report = await CompatibilityDiscovery(FakeGateway()).discover(McpStatus.FAILED)
 

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -38,8 +39,11 @@ class ResearchCoordinator:
         objective: str,
         criteria: list[str],
         message: str,
+        on_session_created: Callable[[str], None] | None = None,
     ) -> StartedResearch:
         session = await self.gateway.create_session(title)
+        if on_session_created is not None:
+            on_session_created(session.session_id)
         goal = await self.gateway.create_research_goal(
             session.session_id, objective, criteria
         )

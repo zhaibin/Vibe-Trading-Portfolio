@@ -1,6 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -18,6 +18,8 @@ from vibe_portfolio.vibe.models import (
     SseTicket,
 )
 from vibe_portfolio.vibe.sse import SseEvent
+
+AwaitedT = TypeVar("AwaitedT")
 
 
 class RuntimeDiscovery(Protocol):
@@ -91,72 +93,78 @@ class RuntimeContractVerifier:
         version: str | None = None
         session_id: str | None = None
         attempt_id: str | None = None
-        stream_task: asyncio.Task[SseEvent] | None = None
-        cancelled = False
+        stream_task: asyncio.Task[tuple[SseEvent, SseEvent, SseEvent]] | None = None
+        cancel_attempted = False
         try:
-            report = await self.discovery.discover(McpStatus.NOT_CHECKED)
+            report = await self._bounded(self.discovery.discover(McpStatus.NOT_CHECKED))
             version = report.vibe_version
             if not report.contract_compatible:
                 return self._failed(stage, "route_contract_incompatible", version=version)
 
             stage = "health"
-            health = await self.gateway.health()
+            health = await self._bounded(self.gateway.health())
             if health.status != "healthy":
                 return self._failed(stage, "health_not_healthy", version=version)
 
             stage = "ready"
-            readiness = await self.gateway.ready()
+            readiness = await self._bounded(self.gateway.ready())
             if not readiness.ok:
                 return self._failed(stage, "vibe_not_ready", version=version)
 
             stage = "session"
-            session = await self.gateway.create_session("Portfolio public runtime contract probe")
+            session = await self._bounded(
+                self.gateway.create_session("Portfolio public runtime contract probe")
+            )
             session_id = session.session_id
 
             stage = "goal"
-            goal = await self.gateway.create_research_goal(
-                session_id,
-                "Verify the public research-only Vibe runtime contract",
-                ["Exercise only public runtime endpoints", "Perform no trading or broker writes"],
+            goal = await self._bounded(
+                self.gateway.create_research_goal(
+                    session_id,
+                    "Verify the public research-only Vibe runtime contract",
+                    ["Exercise only public runtime endpoints", "Perform no trading or broker writes"],
+                )
             )
             goal_id = goal.goal.get("goal_id")
             if not isinstance(goal_id, str) or not goal_id.strip():
                 return self._failed(stage, "goal_dto_incompatible", version=version, session_id=session_id)
 
             stage = "ticket"
-            ticket = await self.gateway.mint_sse_ticket()
+            ticket = await self._bounded(self.gateway.mint_sse_ticket())
             if not ticket.ticket.strip():
                 return self._failed(stage, "ticket_dto_incompatible", version=version, session_id=session_id)
 
             stage = "sse"
-            stream_task = asyncio.create_task(self._next_event(session_id, None))
-            await self.sleep(self.stream_warmup_seconds)
+            identity: asyncio.Future[tuple[str, str]] = asyncio.get_running_loop().create_future()
+            stream_task = asyncio.create_task(self._observe_attempt_sequence(session_id, identity))
+            await self._bounded(self.sleep(self.stream_warmup_seconds))
 
             stage = "message"
-            accepted = await self.gateway.send_message(
-                session_id,
-                "Runtime contract probe only. Return no investment advice and perform no external action.",
+            accepted = await self._bounded(
+                self.gateway.send_message(
+                    session_id,
+                    "Runtime contract probe only. Return no investment advice and perform no external action.",
+                )
             )
             attempt_id = accepted.attempt_id
+            identity.set_result((accepted.message_id, accepted.attempt_id))
 
             stage = "sse"
-            first_event = await asyncio.wait_for(stream_task, timeout=self.event_timeout_seconds)
+            _message_event, created_event, started_event = await asyncio.wait_for(
+                stream_task, timeout=self.event_timeout_seconds
+            )
             stream_task = None
-            if not first_event.event_id:
-                return self._failed(
-                    stage,
-                    "sse_event_id_missing",
-                    version=version,
-                    session_id=session_id,
-                    attempt_id=attempt_id,
-                )
 
             stage = "sse_replay"
             replay_event = await asyncio.wait_for(
-                self._next_event(session_id, first_event.event_id),
+                self._next_event(session_id, created_event.event_id),
                 timeout=self.event_timeout_seconds,
             )
-            if not replay_event.event_id or replay_event.event_id == first_event.event_id:
+            if (
+                replay_event.event_id != started_event.event_id
+                or replay_event.event_type != "attempt.started"
+                or replay_event.data.get("attempt_id") != attempt_id
+            ):
                 return self._failed(
                     stage,
                     "sse_replay_incompatible",
@@ -166,7 +174,7 @@ class RuntimeContractVerifier:
                 )
 
             stage = "poll"
-            messages = await self.gateway.list_messages(session_id, limit=100)
+            messages = await self._bounded(self.gateway.list_messages(session_id, limit=100))
             if not any(
                 message.message_id == accepted.message_id
                 and message.session_id == session_id
@@ -182,9 +190,21 @@ class RuntimeContractVerifier:
                 )
 
             stage = "cancel"
-            cancel_result = await self.gateway.cancel(session_id)
-            cancelled = True
-            if cancel_result.status not in {"cancelled", "no_active_loop"}:
+            cancel_attempted = True
+            cancel_result = await self._bounded(self.gateway.cancel(session_id))
+            if cancel_result.status == "no_active_loop":
+                terminal_messages = await self._bounded(
+                    self.gateway.list_messages(session_id, limit=100)
+                )
+                if not self._has_terminal_attempt_message(terminal_messages, session_id, attempt_id):
+                    return self._failed(
+                        stage,
+                        "cancel_not_proven_for_attempt",
+                        version=version,
+                        session_id=session_id,
+                        attempt_id=attempt_id,
+                    )
+            elif cancel_result.status != "cancelled":
                 return self._failed(
                     stage,
                     "cancel_dto_incompatible",
@@ -199,7 +219,7 @@ class RuntimeContractVerifier:
                 vibe_version=version,
                 session_id=session_id,
                 attempt_id=attempt_id,
-                first_event_id=first_event.event_id,
+                first_event_id=created_event.event_id,
                 replay_event_id=replay_event.event_id,
             )
         except TimeoutError:
@@ -230,16 +250,92 @@ class RuntimeContractVerifier:
             if stream_task is not None and not stream_task.done():
                 stream_task.cancel()
                 await asyncio.gather(stream_task, return_exceptions=True)
-            if session_id is not None and not cancelled and stage != "cancel":
+            if session_id is not None and not cancel_attempted:
                 try:
-                    await self.gateway.cancel(session_id)
+                    await self._bounded(self.gateway.cancel(session_id))
+                except asyncio.CancelledError:
+                    raise
                 except Exception:
                     pass
+
+    async def _bounded(self, operation: Awaitable[AwaitedT]) -> AwaitedT:
+        return await asyncio.wait_for(operation, timeout=max(self.event_timeout_seconds, 0.001))
+
+    async def _observe_attempt_sequence(
+        self,
+        session_id: str,
+        identity: asyncio.Future[tuple[str, str]],
+    ) -> tuple[SseEvent, SseEvent, SseEvent]:
+        state = "message"
+        message_event: SseEvent | None = None
+        created_event: SseEvent | None = None
+        async for event in self.gateway.stream_events(session_id, None):
+            if event.event_type == "heartbeat":
+                continue
+            message_id, attempt_id = await identity
+            if state == "message" and event.event_type == "goal.created":
+                continue
+            if state == "message":
+                if (
+                    event.event_type != "message.received"
+                    or event.data.get("message_id") != message_id
+                    or event.data.get("role") != "user"
+                    or not event.event_id
+                ):
+                    raise GatewayError(
+                        GatewayErrorCode.VIBE_CONTRACT_ERROR,
+                        "Vibe SSE message identity or sequence is incompatible",
+                    )
+                message_event = event
+                state = "created"
+                continue
+            if state == "created":
+                if (
+                    event.event_type != "attempt.created"
+                    or event.data.get("attempt_id") != attempt_id
+                    or not event.event_id
+                ):
+                    raise GatewayError(
+                        GatewayErrorCode.VIBE_CONTRACT_ERROR,
+                        "Vibe SSE attempt creation identity or sequence is incompatible",
+                    )
+                created_event = event
+                state = "started"
+                continue
+            if (
+                event.event_type != "attempt.started"
+                or event.data.get("attempt_id") != attempt_id
+                or not event.event_id
+                or message_event is None
+                or created_event is None
+            ):
+                raise GatewayError(
+                    GatewayErrorCode.VIBE_CONTRACT_ERROR,
+                    "Vibe SSE attempt start identity or sequence is incompatible",
+                )
+            return message_event, created_event, event
+        raise GatewayError(
+            GatewayErrorCode.VIBE_CONTRACT_ERROR,
+            "Vibe SSE stream closed before the expected attempt sequence",
+        )
 
     async def _next_event(self, session_id: str, last_event_id: str | None) -> SseEvent:
         async for event in self.gateway.stream_events(session_id, last_event_id):
             return event
         raise GatewayError(GatewayErrorCode.VIBE_CONTRACT_ERROR, "Vibe SSE stream closed without an event")
+
+    @staticmethod
+    def _has_terminal_attempt_message(
+        messages: list[MessageRecord], session_id: str, attempt_id: str
+    ) -> bool:
+        terminal_statuses = {"completed", "failed", "cancelled"}
+        return any(
+            message.session_id == session_id
+            and message.role == "assistant"
+            and message.linked_attempt_id == attempt_id
+            and str((message.metadata or {}).get("status")) in terminal_statuses
+            for message in messages
+        )
 
     @staticmethod
     def _failed(

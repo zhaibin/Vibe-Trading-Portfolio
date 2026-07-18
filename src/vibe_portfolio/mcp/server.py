@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -44,7 +46,33 @@ def build_mcp_server(token: str) -> FastMCP:
 
 
 def _read_token(path: Path) -> str:
-    token = path.read_text(encoding="utf-8").strip()
+    try:
+        before_open = os.lstat(path)
+    except OSError:
+        raise
+    if not stat.S_ISREG(before_open.st_mode):
+        raise ValueError(f"Portfolio MCP token path must be a regular file: {path}")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"Portfolio MCP token path must be a regular file: {path}") from exc
+
+    try:
+        opened = os.fstat(descriptor)
+        after_open = os.lstat(path)
+        same_file = (opened.st_dev, opened.st_ino) == (after_open.st_dev, after_open.st_ino)
+        if not stat.S_ISREG(opened.st_mode) or not same_file:
+            raise ValueError(f"Portfolio MCP token path must be a stable regular file: {path}")
+        if stat.S_IMODE(opened.st_mode) & (stat.S_IRWXG | stat.S_IRWXO):
+            raise PermissionError(f"Portfolio MCP token file must be owner-only: {path}")
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            descriptor = -1
+            token = handle.read().strip()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if not token:
         raise ValueError(f"Portfolio MCP token file is empty: {path}")
     return token

@@ -144,6 +144,16 @@ def test_system_api_exposes_only_diagnostics_and_explicit_read_only_probe() -> N
     }
 
 
+def test_actual_fastapi_router_has_only_the_three_diagnostic_routes() -> None:
+    app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=FakeProbe()))
+
+    assert [route.path for route in app.routes] == [
+        "/api/v1/system/status",
+        "/api/v1/system/compatibility",
+        "/api/v1/system/compatibility/mcp-probe",
+    ]
+
+
 async def test_probe_failure_immediately_invalidates_cached_availability_and_is_sanitized() -> None:
     probe = AvailableThenFailingProbe()
     app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=probe))

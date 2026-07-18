@@ -88,7 +88,14 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             if configured.gateway is not None:
                 await configured.gateway.close()
 
-    app = FastAPI(title="Vibe-Trading Portfolio", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="Vibe-Trading Portfolio",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.services = configured
     app.state.mcp_status = McpStatus.NOT_CHECKED
     app.state._mcp_probe_lock = asyncio.Lock()

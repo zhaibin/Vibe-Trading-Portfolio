@@ -88,9 +88,10 @@ class AttemptWatcher:
                 for message in await self.gateway.list_messages(session_id, limit=100):
                     if message.role == "assistant" and message.linked_attempt_id == attempt_id:
                         status = {
+                            "completed": AttemptStatus.COMPLETED,
                             "failed": AttemptStatus.FAILED,
                             "cancelled": AttemptStatus.CANCELLED,
-                        }.get(str((message.metadata or {}).get("status")), AttemptStatus.COMPLETED)
+                        }.get(str((message.metadata or {}).get("status")), AttemptStatus.FAILED)
                         return AttemptOutcome(
                             session_id, attempt_id, status, tuple(events), None, message, True
                         )

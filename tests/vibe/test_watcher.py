@@ -222,6 +222,31 @@ async def test_polling_preserves_non_success_terminal_status(
     assert outcome.used_polling is True
 
 
+@pytest.mark.parametrize("metadata", [{}, {"status": "mystery"}, None])
+async def test_polling_unknown_or_missing_terminal_status_fails_closed(
+    metadata: dict[str, str] | None,
+) -> None:
+    message = message_for_attempt("attempt-1")
+    message.metadata = metadata
+    gateway = FakeWatchGateway(
+        streams=[GatewayError(GatewayErrorCode.VIBE_UNAVAILABLE, "stream lost")],
+        messages=[message],
+    )
+    watcher = AttemptWatcher(
+        gateway,
+        max_reconnects=0,
+        poll_interval_seconds=0,
+        timeout_seconds=10,
+        sleep=no_sleep,
+    )
+
+    outcome = await watcher.wait("session-1", "attempt-1")
+
+    assert outcome.status is AttemptStatus.FAILED
+    assert outcome.used_polling is True
+    assert outcome.assistant_message == message
+
+
 async def test_failed_terminal_event_is_not_reported_as_success() -> None:
     gateway = FakeWatchGateway(
         streams=[
