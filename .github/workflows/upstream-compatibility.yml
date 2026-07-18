@@ -42,6 +42,9 @@ jobs:
       - name: Start Vibe-Trading without an LLM credential
         env:
           API_AUTH_KEY: compatibility-test-key
+          LANGCHAIN_PROVIDER: ollama
+          LANGCHAIN_MODEL_NAME: portfolio-runtime-contract
+          OLLAMA_BASE_URL: http://127.0.0.1:11434
         run: |
           upstream/.venv/bin/vibe-trading serve --host 127.0.0.1 --port 8899 > /tmp/vibe-trading.log 2>&1 &
           for attempt in $(seq 1 60); do
@@ -53,10 +56,30 @@ jobs:
           cat /tmp/vibe-trading.log
           exit 1
       - name: Verify version and required public routes
+        id: route_contract
         env:
           PORTFOLIO_VIBE_BASE_URL: http://127.0.0.1:8899
           PORTFOLIO_VIBE_API_KEY: compatibility-test-key
-        run: uv run portfolio-compat-check --contract-only
+        run: |
+          uv run portfolio-compat-check --contract-only
+      - name: Verify public runtime DTO, SSE replay, polling, and cancellation
+        id: runtime_contract
+        env:
+          NO_PROXY: 127.0.0.1
+          PORTFOLIO_RUN_RUNTIME_CONTRACT: "1"
+          PORTFOLIO_VIBE_BASE_URL: http://127.0.0.1:8899
+          PORTFOLIO_VIBE_API_KEY: compatibility-test-key
+        run: |
+          uv run pytest \
+            tests/contract/test_live_vibe_contract.py::test_running_vibe_passes_the_public_runtime_contract \
+            -q
+      - name: Record route-only, runtime, and MCP layer states
+        if: always()
+        run: |
+          echo "route-only=${{ steps.route_contract.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "runtime=${{ steps.runtime_contract.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "mcp=not-run (requires operator-installed Portfolio MCP and an explicit model credential)" \
+            >> "$GITHUB_STEP_SUMMARY"
       - name: Upload Vibe log on failure
         if: failure()
         uses: actions/upload-artifact@v4

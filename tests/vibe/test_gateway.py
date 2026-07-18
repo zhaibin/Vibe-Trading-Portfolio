@@ -35,6 +35,47 @@ async def test_reads_api_info_and_openapi(gateway: VibeGateway) -> None:
 
 
 @respx.mock
+async def test_health_and_readiness_require_public_dto_statuses(gateway: VibeGateway) -> None:
+    health_payload = {
+        "status": "healthy",
+        "service": "Vibe-Trading API",
+        "timestamp": "2026-07-18T00:00:00Z",
+    }
+    ready_payload = {
+        "status": "ready",
+        "service": "Vibe-Trading API",
+        "timestamp": "2026-07-18T00:00:00Z",
+    }
+    respx.get("http://127.0.0.1:8899/live").mock(return_value=httpx.Response(200, json=health_payload))
+    respx.get("http://127.0.0.1:8899/health").mock(return_value=httpx.Response(200, json=health_payload))
+    respx.get("http://127.0.0.1:8899/ready").mock(return_value=httpx.Response(200, json=ready_payload))
+
+    assert (await gateway.live()).ok is True
+    assert (await gateway.health()).status == "healthy"
+    assert (await gateway.ready()).ok is True
+    await gateway.close()
+
+
+@pytest.mark.parametrize("path", ["/live", "/health", "/ready"])
+@respx.mock
+async def test_health_dto_drift_maps_to_contract_error(gateway: VibeGateway, path: str) -> None:
+    respx.get(f"http://127.0.0.1:8899{path}").mock(
+        return_value=httpx.Response(200, json={"status": "unexpected"})
+    )
+
+    with pytest.raises(GatewayError) as error:
+        if path == "/live":
+            await gateway.live()
+        elif path == "/health":
+            await gateway.health()
+        else:
+            await gateway.ready()
+
+    assert error.value.code is GatewayErrorCode.VIBE_CONTRACT_ERROR
+    await gateway.close()
+
+
+@respx.mock
 async def test_research_calls_use_public_contract_and_fixed_risk_tier(gateway: VibeGateway) -> None:
     session_route = respx.post("http://127.0.0.1:8899/sessions").mock(
         return_value=httpx.Response(

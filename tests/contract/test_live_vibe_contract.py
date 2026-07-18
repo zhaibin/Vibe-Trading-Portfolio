@@ -12,7 +12,10 @@ from vibe_portfolio.compatibility import (
     McpStatus,
 )
 from vibe_portfolio.config import Settings
+from vibe_portfolio.vibe.contract import RuntimeContractVerifier
 from vibe_portfolio.vibe.gateway import VibeGateway
+from vibe_portfolio.vibe.mcp_probe import PortfolioMcpProbe
+from vibe_portfolio.vibe.watcher import AttemptWatcher
 
 
 def test_pinned_baseline_matches_the_supported_public_contract() -> None:
@@ -31,6 +34,7 @@ def test_pinned_baseline_matches_the_supported_public_contract() -> None:
     assert baseline["required_endpoints"] == [
         [method, path] for _, method, path in REQUIRED_ENDPOINTS
     ]
+    assert baseline["runtime_endpoints"] == [["GET", "/health"], ["GET", "/ready"]]
 
 
 def test_upstream_matrix_pins_minimum_and_stable_without_widening_latest() -> None:
@@ -41,12 +45,15 @@ def test_upstream_matrix_pins_minimum_and_stable_without_widening_latest() -> No
     assert workflow.count(f"ref: {baseline_ref}") == 2
     assert "- name: latest\n            ref: main" in workflow
     assert "portfolio-compat-check --contract-only" in workflow
+    assert "PORTFOLIO_RUN_RUNTIME_CONTRACT: \"1\"" in workflow
+    assert "test_running_vibe_passes_the_public_runtime_contract" in workflow
+    assert "mcp=not-run" in workflow
     assert "ALLOW_SESSION_MCP_SERVERS" not in workflow
     assert "mcpServers" not in workflow
 
 
 @pytest.mark.contract
-async def test_running_vibe_matches_supported_public_contract() -> None:
+async def test_running_vibe_matches_supported_route_contract() -> None:
     base_url = os.environ.get("PORTFOLIO_VIBE_BASE_URL")
     if not base_url:
         pytest.skip("PORTFOLIO_VIBE_BASE_URL is not set")
@@ -59,3 +66,46 @@ async def test_running_vibe_matches_supported_public_contract() -> None:
     assert report.contract_compatible, report.model_dump_json(indent=2)
     assert report.vibe_version is not None
     assert report.missing_capabilities == []
+
+
+@pytest.mark.contract
+async def test_running_vibe_passes_the_public_runtime_contract() -> None:
+    if os.environ.get("PORTFOLIO_RUN_RUNTIME_CONTRACT") != "1":
+        pytest.skip("PORTFOLIO_RUN_RUNTIME_CONTRACT=1 is not set; runtime contract not run")
+    if not os.environ.get("PORTFOLIO_VIBE_BASE_URL"):
+        pytest.fail("PORTFOLIO_RUN_RUNTIME_CONTRACT=1 requires PORTFOLIO_VIBE_BASE_URL")
+
+    settings = Settings()
+    gateway = VibeGateway(settings)
+    try:
+        result = await RuntimeContractVerifier(
+            gateway,
+            CompatibilityDiscovery(gateway),
+            event_timeout_seconds=min(settings.vibe_analysis_timeout_seconds, 30),
+        ).verify()
+    finally:
+        await gateway.close()
+
+    assert result.passed, result.model_dump_json(indent=2)
+
+
+@pytest.mark.contract
+async def test_operator_configured_portfolio_mcp_probe() -> None:
+    if os.environ.get("PORTFOLIO_RUN_MCP_PROBE") != "1":
+        pytest.skip("PORTFOLIO_RUN_MCP_PROBE=1 is not set; full MCP probe not run")
+    if not os.environ.get("PORTFOLIO_VIBE_BASE_URL"):
+        pytest.fail("PORTFOLIO_RUN_MCP_PROBE=1 requires PORTFOLIO_VIBE_BASE_URL")
+
+    settings = Settings()
+    gateway = VibeGateway(settings)
+    watcher = AttemptWatcher(
+        gateway,
+        poll_interval_seconds=settings.vibe_poll_interval_seconds,
+        timeout_seconds=settings.vibe_analysis_timeout_seconds,
+    )
+    try:
+        result = await PortfolioMcpProbe(gateway, watcher).run()
+    finally:
+        await gateway.close()
+
+    assert result.status is McpStatus.AVAILABLE, result

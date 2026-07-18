@@ -22,5 +22,9 @@
     ["GET", "/sessions/{session_id}/events"],
     ["POST", "/auth/sse-ticket"],
     ["POST", "/sessions/{session_id}/cancel"]
+  ],
+  "runtime_endpoints": [
+    ["GET", "/health"],
+    ["GET", "/ready"]
   ]
 }

@@ -19,4 +19,4 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv run ruff check src tests
       - run: uv run mypy src
-      - run: uv run pytest -m "not contract" --cov=vibe_portfolio --cov-report=term-missing
+      - run: uv run pytest -m "not contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85

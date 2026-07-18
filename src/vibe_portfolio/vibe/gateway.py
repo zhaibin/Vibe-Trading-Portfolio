@@ -10,6 +10,7 @@ from vibe_portfolio.vibe.models import (
     ApiInfo,
     CancelResult,
     GoalSnapshot,
+    HealthStatus,
     MessageAccepted,
     MessageRecord,
     ProbeResult,
@@ -106,7 +107,17 @@ class VibeGateway:
 
     async def live(self) -> ProbeResult:
         response = await self._request("GET", "/live")
+        payload = self._decode_model(response, HealthStatus)
+        if payload.status != "healthy":
+            raise self._contract_error("Vibe-Trading liveness response is incompatible")
         return ProbeResult(ok=True, status_code=response.status_code)
+
+    async def health(self) -> HealthStatus:
+        response = await self._request("GET", "/health")
+        payload = self._decode_model(response, HealthStatus)
+        if payload.status != "healthy":
+            raise self._contract_error("Vibe-Trading health response is incompatible")
+        return payload
 
     async def ready(self) -> ProbeResult:
         response = await self._request("GET", "/ready", expected={200, 503})
@@ -114,6 +125,10 @@ class VibeGateway:
         if response.status_code == 503:
             body = self._decode_json(response)
             detail = str(body.get("detail", "not ready")) if isinstance(body, dict) else "not ready"
+        else:
+            payload = self._decode_model(response, HealthStatus)
+            if payload.status != "ready":
+                raise self._contract_error("Vibe-Trading readiness response is incompatible")
         return ProbeResult(ok=response.status_code == 200, status_code=response.status_code, detail=detail)
 
     async def create_session(self, title: str) -> SessionRecord:

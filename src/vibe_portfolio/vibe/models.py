@@ -20,6 +20,12 @@ class ProbeResult(BaseModel):
     detail: str | None = None
 
 
+class HealthStatus(ContractModel):
+    status: str
+    service: str
+    timestamp: str
+
+
 class SessionRecord(ContractModel):
     session_id: str
     title: str
