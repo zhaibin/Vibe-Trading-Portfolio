@@ -4,7 +4,11 @@ from collections.abc import AsyncIterator
 import pytest
 
 from vibe_portfolio.compatibility import McpStatus
-from vibe_portfolio.vibe.mcp_probe import EXPECTED_VIBE_TOOL_NAME, PortfolioMcpProbe
+from vibe_portfolio.vibe.mcp_probe import (
+    ALLOWED_GOAL_CONTROL_TOOLS,
+    EXPECTED_VIBE_TOOL_NAME,
+    PortfolioMcpProbe,
+)
 from vibe_portfolio.vibe.models import (
     CancelResult,
     GoalSnapshot,
@@ -14,6 +18,15 @@ from vibe_portfolio.vibe.models import (
 )
 from vibe_portfolio.vibe.sse import SseEvent
 from vibe_portfolio.vibe.watcher import AttemptOutcome, AttemptStatus, AttemptWatcher
+
+GOAL_CONTROL_TOOLS = tuple(sorted(ALLOWED_GOAL_CONTROL_TOOLS))
+
+
+def test_goal_control_allowlist_is_exact_and_has_no_wildcards() -> None:
+    assert ALLOWED_GOAL_CONTROL_TOOLS == frozenset(
+        {"get_research_goal", "add_goal_evidence", "update_research_goal_status"}
+    )
+    assert all("*" not in tool for tool in ALLOWED_GOAL_CONTROL_TOOLS)
 
 
 class FakeGateway:
@@ -128,6 +141,20 @@ def outcome_with(
     )
 
 
+def tool_event(
+    event_id: str,
+    event_type: str,
+    tool: str,
+    *,
+    status: str | None = None,
+    attempt_id: str = "attempt-1",
+) -> SseEvent:
+    data: dict[str, object] = {"attempt_id": attempt_id, "tool": tool}
+    if status is not None:
+        data["status"] = status
+    return SseEvent(event_id, event_type, data)
+
+
 async def test_probe_requires_observed_successful_tool_call_and_result() -> None:
     events = (
         SseEvent(
@@ -158,6 +185,104 @@ async def test_probe_requires_observed_successful_tool_call_and_result() -> None
     assert "broker-write" in gateway.messages[0][1]
     assert "execute trades" in gateway.messages[0][1]
     assert "mcpServers" not in gateway.messages[0][1]
+    assert len(gateway.messages[0][1]) <= 4_000
+    assert gateway.goal_payloads == [
+        (
+            "session-1",
+            "Verify the operator-approved read-only Portfolio MCP boundary",
+            [
+                "Observe the exact Portfolio MCP tool call",
+                "Observe a successful tool result",
+                "Perform no order placement or portfolio mutation",
+            ],
+        )
+    ]
+
+
+async def test_probe_accepts_correlated_successful_goal_control_pairs() -> None:
+    add_evidence, get_goal, update_status = GOAL_CONTROL_TOOLS
+    events = (
+        tool_event("e1", "tool_call", get_goal),
+        tool_event("e2", "tool_result", get_goal, status="ok"),
+        tool_event("e3", "tool_call", EXPECTED_VIBE_TOOL_NAME),
+        tool_event("e4", "tool_result", EXPECTED_VIBE_TOOL_NAME, status="ok"),
+        tool_event("e5", "tool_call", add_evidence),
+        tool_event("e6", "tool_result", add_evidence, status="ok"),
+        tool_event("e7", "tool_call", update_status),
+        tool_event("e8", "tool_result", update_status, status="ok"),
+        SseEvent("e9", "attempt.completed", {"attempt_id": "attempt-1"}),
+    )
+
+    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome_with(*events))).run()
+
+    assert result.status is McpStatus.AVAILABLE
+    assert result.observed_tools == [
+        get_goal,
+        EXPECTED_VIBE_TOOL_NAME,
+        add_evidence,
+        update_status,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("events", "reason"),
+    [
+        (
+            (tool_event("e1", "tool_result", "add_goal_evidence", status="ok"),),
+            "orphaned_tool_result",
+        ),
+        (
+            (
+                tool_event("e1", "tool_call", "add_goal_evidence"),
+                tool_event("e2", "tool_result", "add_goal_evidence", status="error"),
+            ),
+            "goal_control_result_not_successful",
+        ),
+        (
+            (tool_event("e1", "tool_call", "place_order"),),
+            "unexpected_tool_calls_observed",
+        ),
+        (
+            (tool_event("e1", "tool_result", "unknown_tool", status="ok"),),
+            "unexpected_tool_results_observed",
+        ),
+    ],
+)
+async def test_probe_rejects_unsafe_or_uncorrelated_control_events(
+    events: tuple[SseEvent, ...], reason: str
+) -> None:
+    complete_events = (
+        *events,
+        tool_event("target-call", "tool_call", EXPECTED_VIBE_TOOL_NAME),
+        tool_event(
+            "target-result",
+            "tool_result",
+            EXPECTED_VIBE_TOOL_NAME,
+            status="ok",
+        ),
+        SseEvent("terminal", "attempt.completed", {"attempt_id": "attempt-1"}),
+    )
+
+    result = await PortfolioMcpProbe(
+        FakeGateway(), FakeWatcher(outcome_with(*complete_events))
+    ).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == reason
+
+
+async def test_probe_rejects_goal_control_call_without_a_result() -> None:
+    events = (
+        tool_event("e1", "tool_call", "add_goal_evidence"),
+        tool_event("e2", "tool_call", EXPECTED_VIBE_TOOL_NAME),
+        tool_event("e3", "tool_result", EXPECTED_VIBE_TOOL_NAME, status="ok"),
+        SseEvent("e4", "attempt.completed", {"attempt_id": "attempt-1"}),
+    )
+
+    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome_with(*events))).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == "goal_control_result_not_successful"
 
 
 @pytest.mark.parametrize("metadata", [{}, {"status": "unknown"}])
