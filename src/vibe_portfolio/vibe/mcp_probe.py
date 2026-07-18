@@ -52,13 +52,31 @@ class PortfolioMcpProbe:
             message=PROBE_MESSAGE,
         )
         outcome = await self.watcher.wait(started.session_id, started.attempt_id)
-        observed_tools = [
-            str(event.data["tool"])
-            for event in outcome.events
+        if outcome.session_id != started.session_id:
+            return McpProbeResult(
+                McpStatus.FAILED,
+                started.session_id,
+                started.attempt_id,
+                [],
+                "probe_outcome_session_mismatch",
+            )
+        if outcome.attempt_id != started.attempt_id:
+            return McpProbeResult(
+                McpStatus.FAILED,
+                started.session_id,
+                started.attempt_id,
+                [],
+                "probe_outcome_attempt_mismatch",
+            )
+
+        tool_calls = [
+            (index, event)
+            for index, event in enumerate(outcome.events)
             if event.event_type == "tool_call"
             and event.data.get("attempt_id") == started.attempt_id
             and event.data.get("tool")
         ]
+        observed_tools = [str(event.data["tool"]) for _, event in tool_calls]
 
         if outcome.status is AttemptStatus.TIMED_OUT:
             await self.gateway.cancel(started.session_id)
@@ -94,14 +112,41 @@ class PortfolioMcpProbe:
                 "unexpected_tool_calls_observed",
             )
 
-        successful = any(
-            event.event_type == "tool_result"
+        tool_results = [
+            (index, event)
+            for index, event in enumerate(outcome.events)
+            if event.event_type == "tool_result"
             and event.data.get("attempt_id") == started.attempt_id
-            and event.data.get("tool") == EXPECTED_VIBE_TOOL_NAME
-            and event.data.get("status") == "ok"
-            for event in outcome.events
-        )
-        if not successful:
+        ]
+        if not tool_results:
+            return McpProbeResult(
+                McpStatus.FAILED,
+                started.session_id,
+                started.attempt_id,
+                observed_tools,
+                "tool_result_not_successful",
+            )
+        if (
+            len(tool_results) != 1
+            or tool_results[0][1].data.get("tool") != EXPECTED_VIBE_TOOL_NAME
+        ):
+            return McpProbeResult(
+                McpStatus.FAILED,
+                started.session_id,
+                started.attempt_id,
+                observed_tools,
+                "unexpected_tool_results_observed",
+            )
+        result_index, result_event = tool_results[0]
+        if result_index <= tool_calls[0][0]:
+            return McpProbeResult(
+                McpStatus.FAILED,
+                started.session_id,
+                started.attempt_id,
+                observed_tools,
+                "tool_result_not_after_call",
+            )
+        if result_event.data.get("status") != "ok":
             return McpProbeResult(
                 McpStatus.FAILED,
                 started.session_id,

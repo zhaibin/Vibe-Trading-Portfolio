@@ -48,11 +48,14 @@ class FakeWatcher:
 
 
 def outcome_with(
-    *events: SseEvent, status: AttemptStatus = AttemptStatus.COMPLETED
+    *events: SseEvent,
+    status: AttemptStatus = AttemptStatus.COMPLETED,
+    session_id: str = "session-1",
+    attempt_id: str = "attempt-1",
 ) -> AttemptOutcome:
     terminal = next((event for event in events if event.event_type.startswith("attempt.")), None)
     return AttemptOutcome(
-        "session-1", "attempt-1", status, tuple(events), terminal, None, False
+        session_id, attempt_id, status, tuple(events), terminal, None, False
     )
 
 
@@ -219,6 +222,166 @@ async def test_tool_call_without_successful_result_fails_closed() -> None:
 
     assert result.status is McpStatus.FAILED
     assert result.reason == "tool_result_not_successful"
+
+
+async def test_non_unique_or_unexpected_tool_results_fail_closed() -> None:
+    invalid_results = (
+        (
+            SseEvent(
+                "e2",
+                "tool_result",
+                {
+                    "attempt_id": "attempt-1",
+                    "tool": EXPECTED_VIBE_TOOL_NAME,
+                    "status": "ok",
+                },
+            ),
+            SseEvent(
+                "e3",
+                "tool_result",
+                {
+                    "attempt_id": "attempt-1",
+                    "tool": EXPECTED_VIBE_TOOL_NAME,
+                    "status": "ok",
+                },
+            ),
+        ),
+        (
+            SseEvent(
+                "e2",
+                "tool_result",
+                {
+                    "attempt_id": "attempt-1",
+                    "tool": EXPECTED_VIBE_TOOL_NAME,
+                    "status": "error",
+                },
+            ),
+            SseEvent(
+                "e3",
+                "tool_result",
+                {
+                    "attempt_id": "attempt-1",
+                    "tool": EXPECTED_VIBE_TOOL_NAME,
+                    "status": "ok",
+                },
+            ),
+        ),
+        (
+            SseEvent(
+                "e2",
+                "tool_result",
+                {
+                    "attempt_id": "attempt-1",
+                    "tool": EXPECTED_VIBE_TOOL_NAME,
+                    "status": "ok",
+                },
+            ),
+            SseEvent(
+                "e3",
+                "tool_result",
+                {
+                    "attempt_id": "attempt-1",
+                    "tool": "some_other_tool",
+                    "status": "ok",
+                },
+            ),
+        ),
+    )
+
+    for tool_results in invalid_results:
+        events = (
+            SseEvent(
+                "e1",
+                "tool_call",
+                {"attempt_id": "attempt-1", "tool": EXPECTED_VIBE_TOOL_NAME},
+            ),
+            *tool_results,
+            SseEvent("e4", "attempt.completed", {"attempt_id": "attempt-1"}),
+        )
+
+        result = await PortfolioMcpProbe(
+            FakeGateway(), FakeWatcher(outcome_with(*events))
+        ).run()
+
+        assert result.status is McpStatus.FAILED
+        assert result.reason == "unexpected_tool_results_observed"
+
+
+async def test_tool_result_before_the_unique_call_fails_closed() -> None:
+    events = (
+        SseEvent(
+            "e1",
+            "tool_result",
+            {
+                "attempt_id": "attempt-1",
+                "tool": EXPECTED_VIBE_TOOL_NAME,
+                "status": "ok",
+            },
+        ),
+        SseEvent(
+            "e2",
+            "tool_call",
+            {"attempt_id": "attempt-1", "tool": EXPECTED_VIBE_TOOL_NAME},
+        ),
+        SseEvent("e3", "attempt.completed", {"attempt_id": "attempt-1"}),
+    )
+
+    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome_with(*events))).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == "tool_result_not_after_call"
+
+
+async def test_watcher_outcome_session_mismatch_fails_closed() -> None:
+    events = (
+        SseEvent(
+            "e1",
+            "tool_call",
+            {"attempt_id": "attempt-1", "tool": EXPECTED_VIBE_TOOL_NAME},
+        ),
+        SseEvent(
+            "e2",
+            "tool_result",
+            {
+                "attempt_id": "attempt-1",
+                "tool": EXPECTED_VIBE_TOOL_NAME,
+                "status": "ok",
+            },
+        ),
+        SseEvent("e3", "attempt.completed", {"attempt_id": "attempt-1"}),
+    )
+    outcome = outcome_with(*events, session_id="session-other")
+
+    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome)).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == "probe_outcome_session_mismatch"
+
+
+async def test_watcher_outcome_attempt_mismatch_fails_closed() -> None:
+    events = (
+        SseEvent(
+            "e1",
+            "tool_call",
+            {"attempt_id": "attempt-1", "tool": EXPECTED_VIBE_TOOL_NAME},
+        ),
+        SseEvent(
+            "e2",
+            "tool_result",
+            {
+                "attempt_id": "attempt-1",
+                "tool": EXPECTED_VIBE_TOOL_NAME,
+                "status": "ok",
+            },
+        ),
+        SseEvent("e3", "attempt.completed", {"attempt_id": "attempt-1"}),
+    )
+    outcome = outcome_with(*events, attempt_id="attempt-other")
+
+    result = await PortfolioMcpProbe(FakeGateway(), FakeWatcher(outcome)).run()
+
+    assert result.status is McpStatus.FAILED
+    assert result.reason == "probe_outcome_attempt_mismatch"
 
 
 class MissingGoalGateway(FakeGateway):
