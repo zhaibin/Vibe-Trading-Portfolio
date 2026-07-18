@@ -198,7 +198,7 @@ class RuntimeContractVerifier:
             cancel_attempted = True
             cancel_result = await self._bounded(self.gateway.cancel(session_id))
             if cancel_result.status == "no_active_loop":
-                if not await self._wait_for_terminal_attempt_message(session_id, attempt_id):
+                if not await self._prove_cancelled_or_terminal(session_id, attempt_id):
                     return self._failed(
                         stage,
                         "cancel_not_proven_for_attempt",
@@ -326,16 +326,23 @@ class RuntimeContractVerifier:
             return event
         raise GatewayError(GatewayErrorCode.VIBE_CONTRACT_ERROR, "Vibe SSE stream closed without an event")
 
-    async def _wait_for_terminal_attempt_message(self, session_id: str, attempt_id: str) -> bool:
+    async def _prove_cancelled_or_terminal(self, session_id: str, attempt_id: str) -> bool:
         additional_checks = math.ceil(
             max(self.event_timeout_seconds, 0) / self.terminal_poll_interval_seconds
         )
-        for check_index in range(additional_checks + 1):
+        messages = await self._bounded(self.gateway.list_messages(session_id, limit=100))
+        if self._has_terminal_attempt_message(messages, session_id, attempt_id):
+            return True
+        for _ in range(additional_checks):
+            await self.sleep(self.terminal_poll_interval_seconds)
+            cancel_result = await self._bounded(self.gateway.cancel(session_id))
+            if cancel_result.status == "cancelled":
+                return True
+            if cancel_result.status != "no_active_loop":
+                return False
             messages = await self._bounded(self.gateway.list_messages(session_id, limit=100))
             if self._has_terminal_attempt_message(messages, session_id, attempt_id):
                 return True
-            if check_index < additional_checks:
-                await self.sleep(self.terminal_poll_interval_seconds)
         return False
 
     @staticmethod

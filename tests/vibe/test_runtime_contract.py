@@ -134,10 +134,21 @@ class UnprovenNoActiveLoopGateway(FakeRuntimeGateway):
 
 
 class ScriptedNoActiveLoopGateway(UnprovenNoActiveLoopGateway):
-    def __init__(self, terminal_checks: list[list[MessageRecord]]) -> None:
+    def __init__(
+        self,
+        terminal_checks: list[list[MessageRecord]],
+        *,
+        cancel_statuses: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.terminal_checks = terminal_checks
+        self.cancel_statuses = cancel_statuses or ["no_active_loop"]
         self.poll_calls = 0
+
+    async def cancel(self, session_id: str) -> CancelResult:
+        self.cancel_calls.append(session_id)
+        status_index = min(len(self.cancel_calls) - 1, len(self.cancel_statuses) - 1)
+        return CancelResult(status=self.cancel_statuses[status_index])
 
     async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
         self.poll_calls += 1
@@ -254,6 +265,30 @@ async def test_no_active_loop_polls_until_delayed_exact_terminal_proof() -> None
     assert sleeps == [0, 0.25]
 
 
+async def test_no_active_loop_retries_cancel_after_registration_race() -> None:
+    gateway = ScriptedNoActiveLoopGateway(
+        [[]], cancel_statuses=["no_active_loop", "cancelled"]
+    )
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    result = await RuntimeContractVerifier(
+        gateway,
+        FakeDiscovery(),
+        stream_warmup_seconds=0,
+        event_timeout_seconds=0.5,
+        terminal_poll_interval_seconds=0.25,
+        sleep=record_sleep,
+    ).verify()
+
+    assert result.passed is True
+    assert gateway.cancel_calls == ["session-1", "session-1"]
+    assert gateway.poll_calls == 2
+    assert sleeps == [0, 0.25]
+
+
 async def test_zero_timeout_checks_terminal_messages_once_without_sleeping() -> None:
     gateway = ScriptedNoActiveLoopGateway([[]])
     sleeps: list[float] = []
@@ -269,7 +304,7 @@ async def test_zero_timeout_checks_terminal_messages_once_without_sleeping() -> 
         sleep=record_sleep,
     )
 
-    proven = await verifier._wait_for_terminal_attempt_message("session-1", "attempt-1")
+    proven = await verifier._prove_cancelled_or_terminal("session-1", "attempt-1")
 
     assert proven is False
     assert gateway.poll_calls == 1
@@ -297,7 +332,7 @@ async def test_terminal_polling_rejects_unrelated_or_non_terminal_messages(
         sleep=no_sleep,
     )
 
-    proven = await verifier._wait_for_terminal_attempt_message("session-1", "attempt-1")
+    proven = await verifier._prove_cancelled_or_terminal("session-1", "attempt-1")
 
     assert proven is False
     assert gateway.poll_calls == 3
