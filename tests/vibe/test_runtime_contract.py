@@ -133,27 +133,37 @@ class UnprovenNoActiveLoopGateway(FakeRuntimeGateway):
         return CancelResult(status="no_active_loop")
 
 
-class TerminalNoActiveLoopGateway(UnprovenNoActiveLoopGateway):
-    def __init__(self) -> None:
+class ScriptedNoActiveLoopGateway(UnprovenNoActiveLoopGateway):
+    def __init__(self, terminal_checks: list[list[MessageRecord]]) -> None:
         super().__init__()
+        self.terminal_checks = terminal_checks
         self.poll_calls = 0
 
     async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
         self.poll_calls += 1
         messages = await super().list_messages(session_id, limit)
-        if self.poll_calls > 1:
-            messages.append(
-                MessageRecord(
-                    message_id="assistant-1",
-                    session_id=session_id,
-                    role="assistant",
-                    content="done",
-                    created_at="2026-07-18T00:00:02Z",
-                    linked_attempt_id="attempt-1",
-                    metadata={"status": "completed"},
-                )
-            )
+        terminal_check_index = self.poll_calls - 2
+        if 0 <= terminal_check_index < len(self.terminal_checks):
+            messages.extend(self.terminal_checks[terminal_check_index])
         return messages
+
+
+def terminal_message(
+    *,
+    session_id: str = "session-1",
+    attempt_id: str = "attempt-1",
+    role: str = "assistant",
+    status: str = "completed",
+) -> MessageRecord:
+    return MessageRecord(
+        message_id="assistant-1",
+        session_id=session_id,
+        role=role,
+        content="done",
+        created_at="2026-07-18T00:00:02Z",
+        linked_attempt_id=attempt_id,
+        metadata={"status": status},
+    )
 
 
 async def no_sleep(_: float) -> None:
@@ -208,7 +218,7 @@ async def test_no_active_loop_requires_exact_terminal_proof_for_original_attempt
 
 
 async def test_no_active_loop_passes_with_exact_terminal_proof_for_original_attempt() -> None:
-    gateway = TerminalNoActiveLoopGateway()
+    gateway = ScriptedNoActiveLoopGateway([[terminal_message()]])
 
     result = await RuntimeContractVerifier(
         gateway,
@@ -221,6 +231,86 @@ async def test_no_active_loop_passes_with_exact_terminal_proof_for_original_atte
     assert result.passed is True
     assert gateway.cancel_calls == ["session-1"]
     assert gateway.poll_calls == 2
+
+
+async def test_no_active_loop_polls_until_delayed_exact_terminal_proof() -> None:
+    gateway = ScriptedNoActiveLoopGateway([[], [terminal_message()]])
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    result = await RuntimeContractVerifier(
+        gateway,
+        FakeDiscovery(),
+        stream_warmup_seconds=0,
+        event_timeout_seconds=0.5,
+        terminal_poll_interval_seconds=0.25,
+        sleep=record_sleep,
+    ).verify()
+
+    assert result.passed is True
+    assert gateway.poll_calls == 3
+    assert sleeps == [0, 0.25]
+
+
+async def test_zero_timeout_checks_terminal_messages_once_without_sleeping() -> None:
+    gateway = ScriptedNoActiveLoopGateway([[]])
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    verifier = RuntimeContractVerifier(
+        gateway,
+        FakeDiscovery(),
+        event_timeout_seconds=0,
+        terminal_poll_interval_seconds=0.25,
+        sleep=record_sleep,
+    )
+
+    proven = await verifier._wait_for_terminal_attempt_message("session-1", "attempt-1")
+
+    assert proven is False
+    assert gateway.poll_calls == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        terminal_message(session_id="session-other"),
+        terminal_message(attempt_id="attempt-other"),
+        terminal_message(role="user"),
+        terminal_message(status="running"),
+    ],
+)
+async def test_terminal_polling_rejects_unrelated_or_non_terminal_messages(
+    message: MessageRecord,
+) -> None:
+    gateway = ScriptedNoActiveLoopGateway([[message], [message], [message]])
+    verifier = RuntimeContractVerifier(
+        gateway,
+        FakeDiscovery(),
+        event_timeout_seconds=0.5,
+        terminal_poll_interval_seconds=0.25,
+        sleep=no_sleep,
+    )
+
+    proven = await verifier._wait_for_terminal_attempt_message("session-1", "attempt-1")
+
+    assert proven is False
+    assert gateway.poll_calls == 3
+
+
+@pytest.mark.parametrize("interval", [0, -0.25])
+def test_terminal_poll_interval_must_be_positive(interval: float) -> None:
+    with pytest.raises(ValueError, match="terminal_poll_interval_seconds must be positive"):
+        RuntimeContractVerifier(
+            FakeRuntimeGateway(),
+            FakeDiscovery(),
+            terminal_poll_interval_seconds=interval,
+        )
 
 
 @pytest.mark.parametrize("fail_at", ["session", "goal", "message", "ticket", "sse", "poll", "cancel"])

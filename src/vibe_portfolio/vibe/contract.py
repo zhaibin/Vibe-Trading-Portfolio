@@ -1,4 +1,5 @@
 import asyncio
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Protocol, TypeVar
 
@@ -80,12 +81,16 @@ class RuntimeContractVerifier:
         *,
         stream_warmup_seconds: float = 0.25,
         event_timeout_seconds: float = 10.0,
+        terminal_poll_interval_seconds: float = 0.25,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        if not math.isfinite(terminal_poll_interval_seconds) or terminal_poll_interval_seconds <= 0:
+            raise ValueError("terminal_poll_interval_seconds must be positive")
         self.gateway = gateway
         self.discovery = discovery
         self.stream_warmup_seconds = stream_warmup_seconds
         self.event_timeout_seconds = event_timeout_seconds
+        self.terminal_poll_interval_seconds = terminal_poll_interval_seconds
         self.sleep = sleep
 
     async def verify(self) -> RuntimeContractResult:
@@ -193,10 +198,7 @@ class RuntimeContractVerifier:
             cancel_attempted = True
             cancel_result = await self._bounded(self.gateway.cancel(session_id))
             if cancel_result.status == "no_active_loop":
-                terminal_messages = await self._bounded(
-                    self.gateway.list_messages(session_id, limit=100)
-                )
-                if not self._has_terminal_attempt_message(terminal_messages, session_id, attempt_id):
+                if not await self._wait_for_terminal_attempt_message(session_id, attempt_id):
                     return self._failed(
                         stage,
                         "cancel_not_proven_for_attempt",
@@ -323,6 +325,18 @@ class RuntimeContractVerifier:
         async for event in self.gateway.stream_events(session_id, last_event_id):
             return event
         raise GatewayError(GatewayErrorCode.VIBE_CONTRACT_ERROR, "Vibe SSE stream closed without an event")
+
+    async def _wait_for_terminal_attempt_message(self, session_id: str, attempt_id: str) -> bool:
+        additional_checks = math.ceil(
+            max(self.event_timeout_seconds, 0) / self.terminal_poll_interval_seconds
+        )
+        for check_index in range(additional_checks + 1):
+            messages = await self._bounded(self.gateway.list_messages(session_id, limit=100))
+            if self._has_terminal_attempt_message(messages, session_id, attempt_id):
+                return True
+            if check_index < additional_checks:
+                await self.sleep(self.terminal_poll_interval_seconds)
+        return False
 
     @staticmethod
     def _has_terminal_attempt_message(
