@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vibe-trading-portfolio"
+version = "0.1.0"
+description = "Personal portfolio sidecar for Vibe-Trading"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "fastmcp>=2.14,<3",
+  "httpx>=0.28,<1",
+  "packaging>=24,<27",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.14,<2",
+  "pytest>=8,<10",
+  "pytest-asyncio>=0.25,<2",
+  "pytest-cov>=6,<8",
+  "respx>=0.22,<1",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+portfolio-api = "vibe_portfolio.api.main:main"
+portfolio-mcp = "vibe_portfolio.mcp.server:main"
+portfolio-generate-vibe-config = "vibe_portfolio.mcp.install:main"
+portfolio-compat-check = "vibe_portfolio.cli.compatibility:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vibe_portfolio"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "contract: opt-in tests against a running Vibe-Trading instance",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"

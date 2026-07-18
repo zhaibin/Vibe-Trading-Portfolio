@@ -1,2 +1,15 @@
 .DS_Store
 .worktrees/
+.superpowers/
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+htmlcov/
+.coverage
+dist/
+build/
+var/
