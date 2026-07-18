@@ -11,7 +11,7 @@ Make the opt-in live runtime and full MCP compatibility gates pass against the p
 
 ### Runtime cancellation race
 
-Vibe emits `attempt.started` before its `SessionService` registers the active agent loop. A cancellation issued in that interval returns `no_active_loop`. The terminal assistant message for the same attempt can appear shortly afterward, but the verifier currently checks messages only once and fails before that proof is persisted.
+Vibe emits `attempt.started` before its `SessionService` registers the active agent loop. A cancellation issued in that interval returns `no_active_loop`, while the attempt continues running. A live diagnostic reproduced the race: the initial cancel returned `no_active_loop` at 0.007 seconds and a retry against the same Session returned `cancelled` at 0.264 seconds. Without a retry, a terminal assistant message may take longer than the 30-second live gate and the probe does not actually prove cancellation.
 
 ### MCP probe goal-tool pollution
 
@@ -19,16 +19,22 @@ The probe creates an active finance research goal before sending its message. Vi
 
 ## Design
 
-### Bounded terminal-proof polling
+### Bounded cancellation and terminal-proof polling
 
-When cancellation returns `no_active_loop`, the runtime verifier will poll the public messages route for a bounded period. It will pass only after finding an assistant message that:
+When cancellation returns `no_active_loop`, the runtime verifier will first check the public messages route for exact terminal proof. While no terminal proof exists, each additional bounded attempt will sleep for the configured interval, retry cancellation against the same original Session, and:
+
+- pass immediately if cancellation returns `cancelled`;
+- check messages again if cancellation still returns `no_active_loop`;
+- fail closed if cancellation returns any other status.
+
+Terminal-message proof passes only after finding an assistant message that:
 
 - belongs to the original session;
 - has `linked_attempt_id` equal to the original attempt;
 - carries an explicit terminal status accepted by the existing verifier.
 
 The verifier will expose a positive `terminal_poll_interval_seconds` constructor parameter with a default of `0.25`. After an immediate message check, it may perform at most
-`ceil(event_timeout_seconds / terminal_poll_interval_seconds)` additional sleep-and-check attempts. A zero event timeout therefore performs only the immediate check. The accepted terminal metadata statuses remain the existing explicit set: `completed`, `failed`, and `cancelled`.
+`ceil(event_timeout_seconds / terminal_poll_interval_seconds)` additional sleep, cancel, and conditional message-check attempts. A zero event timeout therefore performs only the immediate terminal-message check and no cancel retry. The accepted terminal metadata statuses remain the existing explicit set: `completed`, `failed`, and `cancelled`.
 
 Exhausting that deterministic attempt bound without exact proof remains `cancel_not_proven_for_attempt`. Gateway errors, malformed responses, invalid polling intervals, and unrelated or non-terminal messages continue to fail closed.
 
@@ -64,15 +70,15 @@ Sending the probe without a goal would avoid Vibe's goal-control calls, but it w
 
 Moving Vibe's active-loop registration or adding a probe-specific goal protocol would couple the sidecar milestone to upstream patches and violate the repository's read-only upstream boundary.
 
-### Add fixed sleeps
+### Add one fixed sleep
 
-A fixed delay before cancellation would hide rather than model the race, remain timing-sensitive, and slow every live gate. Condition-based polling provides exact evidence and a deterministic timeout.
+A single fixed delay before cancellation would hide rather than model the race, remain timing-sensitive, and slow every live gate. Bounded retries against the same Session provide exact cancellation or terminal evidence and a deterministic timeout.
 
 ## Tests
 
 TDD coverage will add:
 
-1. `no_active_loop` followed by a delayed exact terminal message passes.
+1. `no_active_loop` followed by a successful cancel retry against the same Session passes; delayed exact terminal proof remains an accepted fallback.
 2. Delayed unrelated or non-terminal messages never satisfy cancellation proof.
 3. A zero timeout performs one immediate terminal check; exhausting the deterministic bound retains `cancel_not_proven_for_attempt`.
 4. Invalid terminal polling intervals fail closed during verifier construction.

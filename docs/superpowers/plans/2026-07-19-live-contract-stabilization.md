@@ -4,7 +4,7 @@
 
 **Goal:** Make the opt-in live runtime and full MCP gates pass against Vibe-Trading `0.1.11` while preserving exact attempt correlation and fail-closed tool validation.
 
-**Architecture:** Extend `RuntimeContractVerifier` with a deterministic terminal-message polling helper used only after `cancel` returns `no_active_loop`. Refactor the MCP outcome validator into an ordered event scan that accepts the one required Portfolio capability call/result plus only three named, correlated Vibe research-goal control call/result pairs.
+**Architecture:** Extend `RuntimeContractVerifier` with a deterministic same-Session cancel-retry and terminal-message polling helper used only after `cancel` returns `no_active_loop`. Refactor the MCP outcome validator into an ordered event scan that accepts the one required Portfolio capability call/result plus only three named, correlated Vibe research-goal control call/result pairs.
 
 **Tech Stack:** Python 3.11, asyncio, Pydantic DTOs, pytest/pytest-asyncio, Ruff, mypy, uv.
 
@@ -23,13 +23,13 @@
 
 ## File Structure
 
-- Modify `src/vibe_portfolio/vibe/contract.py`: own bounded cancellation terminal-proof polling and polling interval validation.
+- Modify `src/vibe_portfolio/vibe/contract.py`: own bounded same-Session cancellation retry, terminal-proof polling, and polling interval validation.
 - Modify `tests/vibe/test_runtime_contract.py`: prove delayed exact terminal evidence succeeds and all polling bounds/identity failures remain closed.
 - Modify `src/vibe_portfolio/vibe/mcp_probe.py`: own the target/goal-control tool allowlists and ordered call/result validation.
 - Modify `tests/vibe/test_mcp_probe.py`: prove the allowlisted Vibe control-plane sequence passes and unsafe, orphaned, duplicated, reordered, or unsuccessful evidence fails.
 - Modify `docs/handoff/CURRENT.md`: record actual commits, remote state, live process configuration, verification results, and remaining limitations without secrets.
 
-### Task 1: Deterministic cancellation terminal-proof polling
+### Task 1: Deterministic cancellation retry and terminal-proof polling
 
 **Files:**
 - Modify: `src/vibe_portfolio/vibe/contract.py:76-89,192-208,320-333`
@@ -37,7 +37,7 @@
 
 **Interfaces:**
 - Consumes: `RuntimeGateway.list_messages(session_id: str, limit: int = 100) -> list[MessageRecord]` and the existing `_has_terminal_attempt_message(...) -> bool` identity check.
-- Produces: `RuntimeContractVerifier(..., terminal_poll_interval_seconds: float = 0.25, ...)` and `_wait_for_terminal_attempt_message(session_id: str, attempt_id: str) -> bool`.
+- Produces: `RuntimeContractVerifier(..., terminal_poll_interval_seconds: float = 0.25, ...)` and `_prove_cancelled_or_terminal(session_id: str, attempt_id: str) -> bool`.
 
 - [ ] **Step 1: Write failing polling-bound and delayed-proof tests**
 
@@ -45,10 +45,21 @@ Add a scripted gateway and tests to `tests/vibe/test_runtime_contract.py`:
 
 ```python
 class ScriptedNoActiveLoopGateway(UnprovenNoActiveLoopGateway):
-    def __init__(self, terminal_checks: list[list[MessageRecord]]) -> None:
+    def __init__(
+        self,
+        terminal_checks: list[list[MessageRecord]],
+        *,
+        cancel_statuses: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.terminal_checks = terminal_checks
+        self.cancel_statuses = cancel_statuses or ["no_active_loop"]
         self.poll_calls = 0
+
+    async def cancel(self, session_id: str) -> CancelResult:
+        self.cancel_calls.append(session_id)
+        status_index = min(len(self.cancel_calls) - 1, len(self.cancel_statuses) - 1)
+        return CancelResult(status=self.cancel_statuses[status_index])
 
     async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
         self.poll_calls += 1
@@ -94,8 +105,10 @@ async def test_no_active_loop_polls_until_delayed_exact_terminal_proof() -> None
     assert sleeps == [0, 0.25]
 
 
-async def test_zero_timeout_checks_terminal_messages_once_without_sleeping() -> None:
-    gateway = ScriptedNoActiveLoopGateway([[]])
+async def test_no_active_loop_retries_cancel_after_registration_race() -> None:
+    gateway = ScriptedNoActiveLoopGateway(
+        [[]], cancel_statuses=["no_active_loop", "cancelled"]
+    )
     sleeps: list[float] = []
 
     async def record_sleep(seconds: float) -> None:
@@ -105,14 +118,37 @@ async def test_zero_timeout_checks_terminal_messages_once_without_sleeping() -> 
         gateway,
         FakeDiscovery(),
         stream_warmup_seconds=0,
-        event_timeout_seconds=0,
+        event_timeout_seconds=0.5,
         terminal_poll_interval_seconds=0.25,
         sleep=record_sleep,
     ).verify()
 
-    assert result.reason == "cancel_not_proven_for_attempt"
+    assert result.passed is True
+    assert gateway.cancel_calls == ["session-1", "session-1"]
     assert gateway.poll_calls == 2
-    assert sleeps == [0]
+    assert sleeps == [0, 0.25]
+
+
+async def test_zero_timeout_checks_terminal_messages_once_without_sleeping() -> None:
+    gateway = ScriptedNoActiveLoopGateway([[]])
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    verifier = RuntimeContractVerifier(
+        gateway,
+        FakeDiscovery(),
+        event_timeout_seconds=0,
+        terminal_poll_interval_seconds=0.25,
+        sleep=record_sleep,
+    )
+
+    proven = await verifier._prove_cancelled_or_terminal("session-1", "attempt-1")
+
+    assert proven is False
+    assert gateway.poll_calls == 1
+    assert sleeps == []
 
 
 @pytest.mark.parametrize("interval", [0, -0.25])
@@ -135,9 +171,9 @@ Run:
 uv run pytest tests/vibe/test_runtime_contract.py -q
 ```
 
-Expected: the new constructor argument is rejected as unexpected, so the new polling tests fail before implementation.
+Expected: the new constructor argument and `_prove_cancelled_or_terminal` helper are absent, and the registration-race test returns `cancel_not_proven_for_attempt` before implementation.
 
-- [ ] **Step 3: Implement the minimal bounded polling helper**
+- [ ] **Step 3: Implement the minimal bounded cancellation-proof helper**
 
 In `src/vibe_portfolio/vibe/contract.py`, import `math`, validate the new constructor input, and store it:
 
@@ -156,7 +192,7 @@ Replace the single `no_active_loop` message fetch with:
 
 ```python
 if cancel_result.status == "no_active_loop":
-    if not await self._wait_for_terminal_attempt_message(session_id, attempt_id):
+    if not await self._prove_cancelled_or_terminal(session_id, attempt_id):
         return self._failed(
             stage,
             "cancel_not_proven_for_attempt",
@@ -166,19 +202,26 @@ if cancel_result.status == "no_active_loop":
         )
 ```
 
-Add the helper next to `_has_terminal_attempt_message`:
+Add the helper next to `_has_terminal_attempt_message`; it checks exact terminal proof immediately, then retries cancel against the same Session after each bounded interval and polls messages again only while Vibe continues to report `no_active_loop`:
 
 ```python
-async def _wait_for_terminal_attempt_message(self, session_id: str, attempt_id: str) -> bool:
+async def _prove_cancelled_or_terminal(self, session_id: str, attempt_id: str) -> bool:
     additional_checks = math.ceil(
         max(self.event_timeout_seconds, 0) / self.terminal_poll_interval_seconds
     )
-    for check_index in range(additional_checks + 1):
+    messages = await self._bounded(self.gateway.list_messages(session_id, limit=100))
+    if self._has_terminal_attempt_message(messages, session_id, attempt_id):
+        return True
+    for _ in range(additional_checks):
+        await self.sleep(self.terminal_poll_interval_seconds)
+        cancel_result = await self._bounded(self.gateway.cancel(session_id))
+        if cancel_result.status == "cancelled":
+            return True
+        if cancel_result.status != "no_active_loop":
+            return False
         messages = await self._bounded(self.gateway.list_messages(session_id, limit=100))
         if self._has_terminal_attempt_message(messages, session_id, attempt_id):
             return True
-        if check_index < additional_checks:
-            await self._bounded(self.sleep(self.terminal_poll_interval_seconds))
     return False
 ```
 
@@ -190,13 +233,13 @@ Run:
 uv run pytest tests/vibe/test_runtime_contract.py -q
 ```
 
-Expected: all runtime contract unit tests pass, including exact identity, zero-timeout, deterministic exhaustion, and interval validation cases.
+Expected: all runtime contract unit tests pass, including same-Session cancel retry, exact terminal identity, zero-timeout, deterministic exhaustion, and interval validation cases.
 
 - [ ] **Step 5: Commit Task 1**
 
 ```bash
 git add src/vibe_portfolio/vibe/contract.py tests/vibe/test_runtime_contract.py
-git commit -m "fix: poll for runtime terminal proof"
+git commit -m "fix: retry runtime cancel registration race"
 ```
 
 ### Task 2: Strict research-goal-compatible MCP event validation

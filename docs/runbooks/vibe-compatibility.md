@@ -44,7 +44,7 @@ uv run portfolio-compat-check --contract-only
 
 Runtime verification requires `/health` and `/ready` success, then exercises Session creation, a `research_general`
 goal, bounded safety instructions, message/ticket DTOs, SSE first-event and `Last-Event-ID` replay, polling, and
-cancellation:
+same-Session cancellation retry across the active-loop registration race:
 
 ```bash
 PORTFOLIO_RUN_RUNTIME_CONTRACT=1 \
@@ -71,7 +71,10 @@ uv run pytest \
 
 Omitting either opt-in flag means that layer is **skipped/not run**, never passed. Once enabled, any exception is a
 test failure. MCP requires exactly one `mcp_portfolio_portfolio_get_capabilities` call followed by exactly one
-successful result for the same attempt; assistant prose cannot satisfy it.
+successful result for the same attempt; assistant prose cannot satisfy it. The only additional tool events accepted
+are ordered, correlated, successful pairs for `get_research_goal`, `add_goal_evidence`, and
+`update_research_goal_status`. Any other, orphaned, unsuccessful, duplicate target, broker, execution, write, or
+unknown tool event fails closed.
 
 The hermetic release suite enforces at least 85% line coverage:
 
