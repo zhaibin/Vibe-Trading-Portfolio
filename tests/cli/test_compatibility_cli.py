@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -112,6 +115,77 @@ async def test_default_check_fails_when_deep_analysis_is_disabled(
     assert exit_code == 2
     assert json.loads(capsys.readouterr().out)["deep_analysis_enabled"] is False
     assert FakeGateway.closed is True
+
+
+async def test_default_check_succeeds_when_deep_analysis_is_enabled(
+    monkeypatch: MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    install_report(
+        monkeypatch,
+        CompatibilityReport(
+            state=CompatibilityState.COMPATIBLE,
+            analysis_mode=AnalysisMode.FULL_MCP,
+            contract_compatible=True,
+            deep_analysis_enabled=True,
+            vibe_version="0.1.11",
+            mcp_status=McpStatus.AVAILABLE,
+        ),
+    )
+
+    exit_code = await compatibility_cli._check(contract_only=False)
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out)["analysis_mode"] == "full_mcp"
+    assert FakeGateway.closed is True
+
+
+async def test_contract_only_fails_for_an_incompatible_contract(
+    monkeypatch: MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    install_report(
+        monkeypatch,
+        CompatibilityReport(
+            state=CompatibilityState.UNSUPPORTED,
+            analysis_mode=AnalysisMode.DISABLED,
+            contract_compatible=False,
+            deep_analysis_enabled=False,
+            vibe_version="0.2.0",
+            mcp_status=McpStatus.NOT_CHECKED,
+            reasons=["version_out_of_range"],
+        ),
+    )
+
+    exit_code = await compatibility_cli._check(contract_only=True)
+
+    assert exit_code == 2
+    assert json.loads(capsys.readouterr().out)["state"] == "unsupported"
+    assert FakeGateway.closed is True
+
+
+def test_real_console_exits_nonzero_with_machine_readable_offline_report() -> None:
+    environment = {
+        **os.environ,
+        "PORTFOLIO_VIBE_BASE_URL": "http://127.0.0.1:1",
+        "PORTFOLIO_VIBE_CONNECT_TIMEOUT_SECONDS": "0.1",
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "vibe_portfolio.cli.compatibility", "--contract-only"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=10,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert payload["state"] == "degraded"
+    assert payload["analysis_mode"] == "disabled"
+    assert payload["contract_compatible"] is False
+    assert completed.stderr == ""
 
 
 @pytest.mark.parametrize("failure_phase", ["settings", "gateway", "discovery", "close"])

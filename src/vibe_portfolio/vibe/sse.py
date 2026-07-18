@@ -33,7 +33,7 @@ async def iter_sse(lines: AsyncIterator[str]) -> AsyncIterator[SseEvent]:
         if field == "id" and "\x00" not in value:
             event_id = value
         elif field == "event":
-            event_type = value
+            event_type = value or "message"
         elif field == "data":
             data_lines.append(value)
 

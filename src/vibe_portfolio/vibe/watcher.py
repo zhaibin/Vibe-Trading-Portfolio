@@ -83,8 +83,8 @@ class AttemptWatcher:
                 if reconnect_index < self.max_reconnects and self.monotonic() < deadline:
                     await self.sleep(min(0.25 * (2**reconnect_index), 2.0))
 
-            used_polling = True
             while self.monotonic() < deadline:
+                used_polling = True
                 for message in await self.gateway.list_messages(session_id, limit=100):
                     if message.role == "assistant" and message.linked_attempt_id == attempt_id:
                         status = {
@@ -96,7 +96,7 @@ class AttemptWatcher:
                         )
                 await self.sleep(self.poll_interval_seconds)
 
-            return self._timed_out(session_id, attempt_id, events, used_polling=True)
+            return self._timed_out(session_id, attempt_id, events, used_polling=used_polling)
 
         try:
             async with asyncio.timeout(max(self.timeout_seconds, 0)):

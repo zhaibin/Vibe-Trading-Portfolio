@@ -82,12 +82,40 @@ async def test_unknown_version_fails_closed() -> None:
     assert "version_out_of_range" in report.reasons
 
 
+async def test_malformed_version_fails_closed() -> None:
+    report = await CompatibilityDiscovery(FakeGateway(version="not-a-version")).discover(McpStatus.AVAILABLE)
+
+    assert report.state is CompatibilityState.UNSUPPORTED
+    assert report.analysis_mode is AnalysisMode.DISABLED
+    assert report.contract_compatible is False
+    assert "version_out_of_range" in report.reasons
+
+
 async def test_missing_required_route_fails_closed() -> None:
     paths = required_paths(exclude="/sessions/{session_id}/cancel")
     report = await CompatibilityDiscovery(FakeGateway(paths=paths)).discover(McpStatus.AVAILABLE)
 
     assert report.state is CompatibilityState.UNSUPPORTED
     assert "sessions.cancel" in report.missing_capabilities
+
+
+async def test_missing_one_method_on_shared_messages_path_fails_closed() -> None:
+    paths = required_paths()
+    del paths["/sessions/{session_id}/messages"]["get"]
+
+    report = await CompatibilityDiscovery(FakeGateway(paths=paths)).discover(McpStatus.AVAILABLE)
+
+    assert report.state is CompatibilityState.UNSUPPORTED
+    assert report.analysis_mode is AnalysisMode.DISABLED
+    assert report.missing_capabilities == ["messages.poll"]
+
+
+async def test_failed_mcp_probe_has_an_explicit_bounded_context_reason() -> None:
+    report = await CompatibilityDiscovery(FakeGateway()).discover(McpStatus.FAILED)
+
+    assert report.state is CompatibilityState.DEGRADED
+    assert report.analysis_mode is AnalysisMode.BOUNDED_CONTEXT
+    assert report.reasons == ["mcp_probe_failed"]
 
 
 async def test_offline_and_not_ready_keep_local_product_available() -> None:

@@ -1,0 +1,26 @@
+{
+  "schema_version": "vibe-compatibility-baseline.v1",
+  "captured_at": "2026-07-18",
+  "repository": "https://github.com/zhaibin/Vibe-Trading.git",
+  "minimum": {
+    "ref": "67a393e4574865e8ab9b1b3f9a9fd1d7ab337343",
+    "version": "0.1.11"
+  },
+  "stable": {
+    "ref": "67a393e4574865e8ab9b1b3f9a9fd1d7ab337343",
+    "version": "0.1.11"
+  },
+  "latest": {
+    "ref": "main",
+    "allowed_to_advance_support_range": false
+  },
+  "required_endpoints": [
+    ["POST", "/sessions"],
+    ["POST", "/sessions/{session_id}/goal"],
+    ["POST", "/sessions/{session_id}/messages"],
+    ["GET", "/sessions/{session_id}/messages"],
+    ["GET", "/sessions/{session_id}/events"],
+    ["POST", "/auth/sse-ticket"],
+    ["POST", "/sessions/{session_id}/cancel"]
+  ]
+}

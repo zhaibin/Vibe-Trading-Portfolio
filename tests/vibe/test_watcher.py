@@ -43,6 +43,12 @@ async def test_parser_ignores_comments_and_dispatches_final_unterminated_frame()
     ]
 
 
+async def test_parser_normalizes_an_empty_event_field_to_message() -> None:
+    events = [event async for event in iter_sse(as_lines(["event:", "data: {}", ""]))]
+
+    assert events == [SseEvent(event_id=None, event_type="message", data={})]
+
+
 class FakeWatchGateway:
     def __init__(
         self,
@@ -135,6 +141,66 @@ async def test_falls_back_to_polling_the_original_attempt() -> None:
     assert outcome.used_polling is True
     assert outcome.assistant_message == assistant
     assert gateway.stream_calls == [("session-1", None)]
+
+
+async def test_polling_flag_is_false_when_deadline_expires_before_a_poll() -> None:
+    monotonic_calls = 0
+
+    def monotonic() -> float:
+        nonlocal monotonic_calls
+        monotonic_calls += 1
+        return 0.0 if monotonic_calls < 3 else 2.0
+
+    gateway = FakeWatchGateway(streams=[[]])
+    watcher = AttemptWatcher(
+        gateway,
+        max_reconnects=0,
+        timeout_seconds=1,
+        sleep=no_sleep,
+        monotonic=monotonic,
+    )
+
+    outcome = await watcher.wait("session-1", "attempt-1")
+
+    assert outcome.status is AttemptStatus.TIMED_OUT
+    assert outcome.used_polling is False
+    assert gateway.poll_calls == 0
+
+
+async def test_stream_errors_exhaust_retries_with_bounded_backoff_before_polling() -> None:
+    sleep_delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    gateway = FakeWatchGateway(
+        streams=[
+            GatewayError(GatewayErrorCode.VIBE_UNAVAILABLE, "stream lost 1"),
+            GatewayError(GatewayErrorCode.VIBE_TIMEOUT, "stream lost 2"),
+            GatewayError(GatewayErrorCode.VIBE_UPSTREAM_ERROR, "stream lost 3"),
+        ],
+        messages=[message_for_attempt("attempt-1")],
+    )
+    watcher = AttemptWatcher(
+        gateway,
+        max_reconnects=2,
+        poll_interval_seconds=1,
+        timeout_seconds=10,
+        sleep=record_sleep,
+        monotonic=lambda: 0.0,
+    )
+
+    outcome = await watcher.wait("session-1", "attempt-1")
+
+    assert outcome.status is AttemptStatus.COMPLETED
+    assert outcome.used_polling is True
+    assert gateway.stream_calls == [
+        ("session-1", None),
+        ("session-1", None),
+        ("session-1", None),
+    ]
+    assert sleep_delays == [0.25, 0.5]
+    assert gateway.poll_calls == 1
 
 
 @pytest.mark.parametrize(

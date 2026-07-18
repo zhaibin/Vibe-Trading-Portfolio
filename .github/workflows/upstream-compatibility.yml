@@ -1,0 +1,65 @@
+name: upstream compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        baseline:
+          - name: minimum
+            ref: 67a393e4574865e8ab9b1b3f9a9fd1d7ab337343
+          - name: stable
+            ref: 67a393e4574865e8ab9b1b3f9a9fd1d7ab337343
+          - name: latest
+            ref: main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Portfolio sidecar
+        uses: actions/checkout@v4
+      - name: Check out Vibe-Trading ${{ matrix.baseline.name }}
+        uses: actions/checkout@v4
+        with:
+          repository: zhaibin/Vibe-Trading
+          ref: ${{ matrix.baseline.ref }}
+          path: upstream
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install both repositories
+        run: |
+          uv sync --frozen --extra dev
+          uv venv upstream/.venv --python 3.11
+          uv pip install --python upstream/.venv/bin/python -e ./upstream
+      - name: Start Vibe-Trading without an LLM credential
+        env:
+          API_AUTH_KEY: compatibility-test-key
+        run: |
+          upstream/.venv/bin/vibe-trading serve --host 127.0.0.1 --port 8899 > /tmp/vibe-trading.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8899/live > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/vibe-trading.log
+          exit 1
+      - name: Verify version and required public routes
+        env:
+          PORTFOLIO_VIBE_BASE_URL: http://127.0.0.1:8899
+          PORTFOLIO_VIBE_API_KEY: compatibility-test-key
+        run: uv run portfolio-compat-check --contract-only
+      - name: Upload Vibe log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibe-${{ matrix.baseline.name }}-log
+          path: /tmp/vibe-trading.log
