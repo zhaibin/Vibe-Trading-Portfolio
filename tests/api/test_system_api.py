@@ -1,3 +1,6 @@
+import asyncio
+
+import httpx
 from fastapi.testclient import TestClient
 
 from vibe_portfolio.api.app import AppServices, create_app
@@ -35,6 +38,44 @@ class FakeProbe:
             "attempt-1",
             ["mcp_portfolio_portfolio_get_capabilities"],
         )
+
+
+class AvailableThenFailingProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.failure_entered = asyncio.Event()
+        self.release_failure = asyncio.Event()
+
+    async def run(self) -> McpProbeResult:
+        self.calls += 1
+        if self.calls == 1:
+            return McpProbeResult(McpStatus.AVAILABLE, "session-1", "attempt-1", ["portfolio-tool"])
+        self.failure_entered.set()
+        await self.release_failure.wait()
+        raise RuntimeError("broker_token=must-not-leak")
+
+
+class OrderedProbe:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+        self.first_entered = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def run(self) -> McpProbeResult:
+        self.calls += 1
+        call_number = self.calls
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            if call_number == 1:
+                self.first_entered.set()
+                await self.release_first.wait()
+                return McpProbeResult(McpStatus.AVAILABLE, "session-1", "attempt-1", ["portfolio-tool"])
+            return McpProbeResult(McpStatus.FAILED, "session-2", "attempt-2", [], "second_probe_failed")
+        finally:
+            self.active -= 1
 
 
 def test_get_compatibility_is_read_only_and_does_not_run_mcp_probe() -> None:
@@ -90,3 +131,52 @@ def test_system_api_exposes_only_diagnostics_and_explicit_read_only_probe() -> N
         ("/api/v1/system/compatibility", "get"),
         ("/api/v1/system/compatibility/mcp-probe", "post"),
     }
+
+
+async def test_probe_failure_immediately_invalidates_cached_availability_and_is_sanitized() -> None:
+    probe = AvailableThenFailingProbe()
+    app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=probe))
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as client:
+        first = await client.post("/api/v1/system/compatibility/mcp-probe")
+        failed_task = asyncio.create_task(client.post("/api/v1/system/compatibility/mcp-probe"))
+        await probe.failure_entered.wait()
+        while_running = await client.get("/api/v1/system/status")
+        probe.release_failure.set()
+        failed = await failed_task
+        compatibility = await client.get("/api/v1/system/compatibility")
+
+    assert first.status_code == 200
+    assert while_running.json()["mcp_status"] == "failed"
+    assert failed.status_code == 502
+    assert failed.json()["error"] == {
+        "code": "MCP_PROBE_FAILED",
+        "message": "Portfolio MCP compatibility probe failed",
+    }
+    assert failed.json()["probe"] == {"status": "failed", "reason": "probe_execution_failed"}
+    assert "must-not-leak" not in failed.text
+    assert compatibility.json()["state"] == "degraded"
+    assert compatibility.json()["mcp_status"] == "failed"
+
+
+async def test_concurrent_probe_requests_are_serialized_and_preserve_request_order() -> None:
+    probe = OrderedProbe()
+    app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=probe))
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as client:
+        first_task = asyncio.create_task(client.post("/api/v1/system/compatibility/mcp-probe"))
+        await probe.first_entered.wait()
+        second_task = asyncio.create_task(client.post("/api/v1/system/compatibility/mcp-probe"))
+        await asyncio.sleep(0.01)
+        calls_before_first_completed = probe.calls
+        probe.release_first.set()
+        first, second = await asyncio.gather(first_task, second_task)
+        status = await client.get("/api/v1/system/status")
+
+    assert calls_before_first_completed == 1
+    assert probe.max_active == 1
+    assert first.json()["probe"]["status"] == "available"
+    assert second.json()["probe"]["status"] == "failed"
+    assert status.json()["mcp_status"] == "failed"

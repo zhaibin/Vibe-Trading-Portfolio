@@ -1,17 +1,37 @@
 import argparse
 import asyncio
 
-from vibe_portfolio.compatibility import CompatibilityDiscovery, McpStatus
+from vibe_portfolio.compatibility import (
+    AnalysisMode,
+    CompatibilityDiscovery,
+    CompatibilityReport,
+    CompatibilityState,
+    McpStatus,
+)
 from vibe_portfolio.config import Settings
 from vibe_portfolio.vibe.gateway import VibeGateway
 
 
+def _failed_report() -> CompatibilityReport:
+    return CompatibilityReport(
+        state=CompatibilityState.DEGRADED,
+        analysis_mode=AnalysisMode.DISABLED,
+        contract_compatible=False,
+        deep_analysis_enabled=False,
+        mcp_status=McpStatus.NOT_CHECKED,
+        reasons=["compatibility_check_failed"],
+    )
+
+
 async def _check(contract_only: bool) -> int:
-    gateway = VibeGateway(Settings())
     try:
-        report = await CompatibilityDiscovery(gateway).discover(McpStatus.NOT_CHECKED)
-    finally:
-        await gateway.close()
+        gateway = VibeGateway(Settings())
+        try:
+            report = await CompatibilityDiscovery(gateway).discover(McpStatus.NOT_CHECKED)
+        finally:
+            await gateway.close()
+    except Exception:
+        report = _failed_report()
 
     print(report.model_dump_json(indent=2))
     if contract_only:
