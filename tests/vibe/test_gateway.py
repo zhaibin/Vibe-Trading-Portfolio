@@ -1,0 +1,124 @@
+import httpx
+import pytest
+import respx
+
+from vibe_portfolio.config import Settings
+from vibe_portfolio.vibe.errors import GatewayError, GatewayErrorCode
+from vibe_portfolio.vibe.gateway import VibeGateway
+
+
+@pytest.fixture
+def gateway() -> VibeGateway:
+    return VibeGateway(Settings(vibe_api_key="test-key"))
+
+
+@respx.mock
+async def test_reads_api_info_and_openapi(gateway: VibeGateway) -> None:
+    api_route = respx.get("http://127.0.0.1:8899/api").mock(
+        return_value=httpx.Response(
+            200,
+            json={"service": "Vibe-Trading API", "version": "0.1.11", "docs": "/docs", "health": "/health"},
+        )
+    )
+    spec_route = respx.get("http://127.0.0.1:8899/openapi.json").mock(
+        return_value=httpx.Response(200, json={"openapi": "3.1.0", "paths": {"/sessions": {"post": {}}}})
+    )
+
+    assert (await gateway.api_info()).version == "0.1.11"
+    assert "/sessions" in (await gateway.openapi())["paths"]
+    assert api_route.calls[0].request.headers["Authorization"] == "Bearer test-key"
+    assert spec_route.called
+    await gateway.close()
+
+
+@respx.mock
+async def test_research_calls_use_public_contract_and_fixed_risk_tier(gateway: VibeGateway) -> None:
+    session_route = respx.post("http://127.0.0.1:8899/sessions").mock(
+        return_value=httpx.Response(
+            201,
+            json={
+                "session_id": "session-1",
+                "title": "Portfolio compatibility probe",
+                "status": "active",
+                "created_at": "2026-07-18T00:00:00Z",
+                "updated_at": "2026-07-18T00:00:00Z",
+                "last_attempt_id": None,
+            },
+        )
+    )
+    goal_route = respx.post("http://127.0.0.1:8899/sessions/session-1/goal").mock(
+        return_value=httpx.Response(
+            201,
+            json={"goal": {"goal_id": "goal-1"}, "claims": [], "criteria": [], "evidence": [], "evidence_count": 0},
+        )
+    )
+    message_route = respx.post("http://127.0.0.1:8899/sessions/session-1/messages").mock(
+        return_value=httpx.Response(200, json={"message_id": "message-1", "attempt_id": "attempt-1"})
+    )
+
+    session = await gateway.create_session("Portfolio compatibility probe")
+    await gateway.create_research_goal(
+        session.session_id,
+        "Verify read-only Portfolio context",
+        ["Call the approved Portfolio MCP tool"],
+    )
+    accepted = await gateway.send_message(session.session_id, "Read-only compatibility check")
+
+    assert accepted.attempt_id == "attempt-1"
+    assert session_route.calls[0].request.content == b'{"title":"Portfolio compatibility probe","config":{}}'
+    assert b'"risk_tier":"research_general"' in goal_route.calls[0].request.content
+    assert b"mcpServers" not in session_route.calls[0].request.content
+    assert message_route.called
+    await gateway.close()
+
+
+@respx.mock
+async def test_maps_auth_and_offline_failures(gateway: VibeGateway) -> None:
+    route = respx.get("http://127.0.0.1:8899/api").mock(return_value=httpx.Response(401, json={"detail": "invalid"}))
+
+    with pytest.raises(GatewayError) as auth_error:
+        await gateway.api_info()
+    assert auth_error.value.code is GatewayErrorCode.VIBE_AUTH_FAILED
+
+    route.mock(side_effect=httpx.ConnectError("offline"))
+    with pytest.raises(GatewayError) as offline_error:
+        await gateway.api_info()
+    assert offline_error.value.code is GatewayErrorCode.VIBE_UNAVAILABLE
+    await gateway.close()
+
+
+async def test_rejects_messages_larger_than_bounded_context(gateway: VibeGateway) -> None:
+    with pytest.raises(ValueError, match="4,000"):
+        await gateway.send_message("session-1", "x" * 4001)
+    await gateway.close()
+
+
+@respx.mock
+async def test_supports_poll_ticket_and_cancel_contracts(gateway: VibeGateway) -> None:
+    respx.get(url__startswith="http://127.0.0.1:8899/sessions/session-1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "message_id": "message-2",
+                    "session_id": "session-1",
+                    "role": "assistant",
+                    "content": "done",
+                    "created_at": "2026-07-18T00:00:01Z",
+                    "linked_attempt_id": "attempt-1",
+                    "metadata": {"status": "completed"},
+                }
+            ],
+        )
+    )
+    respx.post("http://127.0.0.1:8899/auth/sse-ticket").mock(
+        return_value=httpx.Response(200, json={"ticket": "ticket-1"})
+    )
+    respx.post("http://127.0.0.1:8899/sessions/session-1/cancel").mock(
+        return_value=httpx.Response(200, json={"status": "cancelled"})
+    )
+
+    assert (await gateway.list_messages("session-1"))[0].linked_attempt_id == "attempt-1"
+    assert (await gateway.mint_sse_ticket()).ticket == "ticket-1"
+    assert (await gateway.cancel("session-1")).status == "cancelled"
+    await gateway.close()
