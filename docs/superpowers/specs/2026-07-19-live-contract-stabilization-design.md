@@ -5,7 +5,7 @@
 
 ## Objective
 
-Make the opt-in live runtime and full MCP compatibility gates pass against the pinned Vibe-Trading `0.1.11` baseline without modifying AInvest, weakening fail-closed behavior, or allowing extra MCP tool calls.
+Make the opt-in live runtime and full MCP compatibility gates pass against the pinned Vibe-Trading `0.1.11` baseline without modifying AInvest, weakening fail-closed behavior, or permitting unrelated, broker, execution, or unknown tool calls.
 
 ## Observed failures
 
@@ -27,27 +27,38 @@ When cancellation returns `no_active_loop`, the runtime verifier will poll the p
 - has `linked_attempt_id` equal to the original attempt;
 - carries an explicit terminal status accepted by the existing verifier.
 
-Polling uses the verifier's injected sleep function and a small explicit interval. Exhausting the existing event timeout without exact proof remains `cancel_not_proven_for_attempt`. Gateway errors and malformed responses continue to fail closed.
+The verifier will expose a positive `terminal_poll_interval_seconds` constructor parameter with a default of `0.25`. After an immediate message check, it may perform at most
+`ceil(event_timeout_seconds / terminal_poll_interval_seconds)` additional sleep-and-check attempts. A zero event timeout therefore performs only the immediate check. The accepted terminal metadata statuses remain the existing explicit set: `completed`, `failed`, and `cancelled`.
 
-### Goal-free compatibility probe attempt
+Exhausting that deterministic attempt bound without exact proof remains `cancel_not_proven_for_attempt`. Gateway errors, malformed responses, invalid polling intervals, and unrelated or non-terminal messages continue to fail closed.
 
-The MCP compatibility probe will create a normal public Session and send the existing bounded, research-only safety message directly. It will not create an active finance research goal for this protocol-only attempt.
+### Research-goal-compatible MCP event validation
 
-This removes Vibe's mandatory goal-ledger instructions while retaining all probe safety properties:
+The MCP compatibility probe will continue to use `ResearchCoordinator`, create a `research_general` goal, register cleanup responsibility immediately after Session creation, and send the existing bounded safety message. Existing best-effort cancellation remains responsible for the original Session until an exact terminal outcome is proven.
+
+Vibe `0.1.11` requires an active research goal to record tool-backed evidence and close its audit ledger. The event validator will therefore distinguish the Portfolio MCP boundary under test from Vibe's explicitly allowed research-goal control plane:
 
 - only public REST, SSE, and operator-installed MCP are used;
+- Session payloads remain free of `mcpServers` and Session MCP overrides;
+- every Agent message remains bounded to 4,000 characters, classified by a `research_general` goal, and suffixed with the no-trading safety instructions;
 - the message still prohibits orders, broker writes, trade execution, and portfolio mutation;
 - the watcher remains bound to the created session and accepted attempt;
 - success still requires exactly one `mcp_portfolio_portfolio_get_capabilities` call and exactly one later successful result;
-- any additional tool call or result still fails the gate.
+- the only additional tool calls/results permitted are the Vibe research-goal control tools `get_research_goal`, `add_goal_evidence`, and `update_research_goal_status`;
+- every permitted goal-control result must name a previously observed permitted goal-control call and report `status="ok"`;
+- any other Portfolio MCP tool, non-allowlisted Vibe tool, broker tool, execution tool, write tool, unknown tool, duplicate target call/result, reordered target result, or unsuccessful target result fails the gate.
 
-Ordinary portfolio research continues to use `ResearchCoordinator` and a `research_general` goal. Only the narrow compatibility probe bypasses goal creation.
+The probe result will continue to report all observed tool names for diagnosis. Allowing the three goal-control tools does not count them as evidence that the Portfolio MCP boundary is available; only the exact target call/result pair can produce `available`.
 
 ## Alternatives rejected
 
-### Ignore goal-management tools
+### Ignore all non-Portfolio tools
 
-Allowlisting Vibe's goal tools inside the verifier would make the current run pass, but it would weaken the documented exact-call invariant and could hide unrelated tool use.
+Ignoring every non-Portfolio tool would make the current run pass, but it could hide unrelated or unsafe tool use. The design instead permits only three named Vibe research-goal control tools and rejects every other non-target tool.
+
+### Bypass research goal creation
+
+Sending the probe without a goal would avoid Vibe's goal-control calls, but it would violate the Milestone 0 requirement that Agent messages use `risk_tier="research_general"` and would bypass the established research-only coordination boundary.
 
 ### Modify AInvest
 
@@ -63,9 +74,11 @@ TDD coverage will add:
 
 1. `no_active_loop` followed by a delayed exact terminal message passes.
 2. Delayed unrelated or non-terminal messages never satisfy cancellation proof.
-3. Exhausting the bound retains `cancel_not_proven_for_attempt`.
-4. MCP probe creates a Session and sends the probe without creating a goal.
-5. The existing exact tool-call/result checks continue to reject missing, duplicate, reordered, unsuccessful, or additional events.
+3. A zero timeout performs one immediate terminal check; exhausting the deterministic bound retains `cancel_not_proven_for_attempt`.
+4. Invalid terminal polling intervals fail closed during verifier construction.
+5. MCP probe continues to create a `research_general` goal, keeps Session payloads free of `mcpServers`, and preserves bounded no-trading messages and failure cleanup.
+6. The exact target call/result passes when interleaved only with successful, ordered results for the three allowlisted goal-control tools.
+7. Orphaned or unsuccessful goal-control results and missing, duplicate, reordered, unsuccessful, additional Portfolio MCP, broker, execution, write, unknown, or other non-allowlisted tool events still fail the gate.
 
 Verification after implementation:
 
