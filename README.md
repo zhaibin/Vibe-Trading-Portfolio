@@ -4,6 +4,10 @@ Independent personal-portfolio Sidecar for [zhaibin/Vibe-Trading](https://github
 
 Milestone 0 proves only the external integration boundary: Vibe version/capability discovery, research-only Sessions, SSE recovery with polling fallback, cancellation, and one operator-approved read-only MCP tool. Ledger, imports, analytics, recommendations, scheduling, and UI arrive in later milestones.
 
+## New session handoff
+
+Agents and maintainers should start with [`AGENTS.md`](AGENTS.md) and the current [`docs/handoff/CURRENT.md`](docs/handoff/CURRENT.md). A new session must verify the live Git state, report its understanding and recommended next step, and wait for user approval before continuing milestone work.
+
 ## Local setup
 
 ```bash
