@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from typing import Any, TypeVar, cast
 
 import httpx
@@ -15,6 +16,7 @@ from vibe_portfolio.vibe.models import (
     SessionRecord,
     SseTicket,
 )
+from vibe_portfolio.vibe.sse import SseEvent, iter_sse
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
@@ -156,3 +158,28 @@ class VibeGateway:
     async def mint_sse_ticket(self) -> SseTicket:
         response = await self._request("POST", "/auth/sse-ticket")
         return self._decode_model(response, SseTicket)
+
+    async def stream_events(
+        self, session_id: str, last_event_id: str | None = None
+    ) -> AsyncIterator[SseEvent]:
+        """Open one ticket-authenticated stream; callers own reconnect policy."""
+        ticket = await self.mint_sse_ticket()
+        params = {"ticket": ticket.ticket, "replay": "active"}
+        headers = {"Last-Event-ID": last_event_id} if last_event_id else {}
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/sessions/{session_id}/events",
+                params=params,
+                headers=headers,
+            ) as response:
+                if response.status_code != 200:
+                    self._raise_response_error(response)
+                async for event in iter_sse(response.aiter_lines()):
+                    yield event
+        except GatewayError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise GatewayError(GatewayErrorCode.VIBE_TIMEOUT, "Vibe-Trading SSE timed out") from exc
+        except httpx.RequestError as exc:
+            raise GatewayError(GatewayErrorCode.VIBE_UNAVAILABLE, "Vibe-Trading SSE disconnected") from exc

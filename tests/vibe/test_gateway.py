@@ -7,6 +7,7 @@ import respx
 from vibe_portfolio.config import Settings
 from vibe_portfolio.vibe.errors import GatewayError, GatewayErrorCode
 from vibe_portfolio.vibe.gateway import VibeGateway
+from vibe_portfolio.vibe.sse import SseEvent
 
 
 @pytest.fixture
@@ -169,4 +170,49 @@ async def test_supports_poll_ticket_and_cancel_contracts(gateway: VibeGateway) -
     assert (await gateway.list_messages("session-1"))[0].linked_attempt_id == "attempt-1"
     assert (await gateway.mint_sse_ticket()).ticket == "ticket-1"
     assert (await gateway.cancel("session-1")).status == "cancelled"
+    await gateway.close()
+
+
+@respx.mock
+async def test_stream_events_uses_ticket_replay_and_last_event_id(gateway: VibeGateway) -> None:
+    respx.post("http://127.0.0.1:8899/auth/sse-ticket").mock(
+        return_value=httpx.Response(200, json={"ticket": "ticket-2"})
+    )
+    event_route = respx.get(url__startswith="http://127.0.0.1:8899/sessions/session-1/events").mock(
+        return_value=httpx.Response(
+            200,
+            text='id: e2\nevent: attempt.completed\ndata: {"attempt_id":"attempt-1"}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+    )
+
+    events = [event async for event in gateway.stream_events("session-1", "e1")]
+
+    assert events == [SseEvent("e2", "attempt.completed", {"attempt_id": "attempt-1"})]
+    request = event_route.calls[0].request
+    assert request.url.params["ticket"] == "ticket-2"
+    assert request.url.params["replay"] == "active"
+    assert request.headers["Last-Event-ID"] == "e1"
+    await gateway.close()
+
+
+@respx.mock
+async def test_each_stream_opening_mints_a_fresh_one_shot_ticket(gateway: VibeGateway) -> None:
+    ticket_route = respx.post("http://127.0.0.1:8899/auth/sse-ticket").mock(
+        side_effect=[
+            httpx.Response(200, json={"ticket": "ticket-1"}),
+            httpx.Response(200, json={"ticket": "ticket-2"}),
+        ]
+    )
+    event_route = respx.get(url__startswith="http://127.0.0.1:8899/sessions/session-1/events").mock(
+        return_value=httpx.Response(200, text="", headers={"content-type": "text/event-stream"})
+    )
+
+    assert [event async for event in gateway.stream_events("session-1")] == []
+    assert [event async for event in gateway.stream_events("session-1", "e1")] == []
+
+    assert ticket_route.call_count == 2
+    assert [call.request.url.params["ticket"] for call in event_route.calls] == ["ticket-1", "ticket-2"]
+    assert event_route.calls[0].request.url.path == event_route.calls[1].request.url.path
+    assert event_route.calls[1].request.headers["Last-Event-ID"] == "e1"
     await gateway.close()
