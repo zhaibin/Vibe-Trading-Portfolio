@@ -1,6 +1,7 @@
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 from vibe_portfolio.config import Settings
 from vibe_portfolio.vibe.errors import GatewayError, GatewayErrorCode
@@ -13,6 +14,12 @@ from vibe_portfolio.vibe.models import (
     ProbeResult,
     SessionRecord,
     SseTicket,
+)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+_RESEARCH_SAFETY_INSTRUCTIONS = (
+    "\n\nResearch safety instructions: Do not place orders, perform broker writes, or execute trades."
 )
 
 
@@ -68,13 +75,29 @@ class VibeGateway:
             GatewayErrorCode.VIBE_UPSTREAM_ERROR, "Vibe-Trading returned an upstream error", response.status_code
         )
 
+    @staticmethod
+    def _contract_error(message: str) -> GatewayError:
+        return GatewayError(GatewayErrorCode.VIBE_CONTRACT_ERROR, message)
+
+    def _decode_json(self, response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise self._contract_error("Vibe-Trading returned an invalid JSON response") from exc
+
+    def _decode_model(self, response: httpx.Response, model: type[ModelT]) -> ModelT:
+        try:
+            return model.model_validate(self._decode_json(response))
+        except (TypeError, ValidationError) as exc:
+            raise self._contract_error("Vibe-Trading returned an incompatible response") from exc
+
     async def api_info(self) -> ApiInfo:
         response = await self._request("GET", "/api")
-        return ApiInfo.model_validate(response.json())
+        return self._decode_model(response, ApiInfo)
 
     async def openapi(self) -> dict[str, Any]:
         response = await self._request("GET", "/openapi.json")
-        payload = response.json()
+        payload = self._decode_json(response)
         if not isinstance(payload, dict) or not isinstance(payload.get("paths"), dict):
             raise GatewayError(GatewayErrorCode.VIBE_CONTRACT_ERROR, "Vibe-Trading OpenAPI document has no paths")
         return cast(dict[str, Any], payload)
@@ -87,13 +110,13 @@ class VibeGateway:
         response = await self._request("GET", "/ready", expected={200, 503})
         detail: str | None = None
         if response.status_code == 503:
-            body = response.json()
+            body = self._decode_json(response)
             detail = str(body.get("detail", "not ready")) if isinstance(body, dict) else "not ready"
         return ProbeResult(ok=response.status_code == 200, status_code=response.status_code, detail=detail)
 
     async def create_session(self, title: str) -> SessionRecord:
         response = await self._request("POST", "/sessions", expected={201}, json={"title": title, "config": {}})
-        return SessionRecord.model_validate(response.json())
+        return self._decode_model(response, SessionRecord)
 
     async def create_research_goal(self, session_id: str, objective: str, criteria: list[str]) -> GoalSnapshot:
         payload = {
@@ -104,22 +127,32 @@ class VibeGateway:
             "risk_tier": "research_general",
         }
         response = await self._request("POST", f"/sessions/{session_id}/goal", expected={201}, json=payload)
-        return GoalSnapshot.model_validate(response.json())
+        return self._decode_model(response, GoalSnapshot)
 
     async def send_message(self, session_id: str, content: str) -> MessageAccepted:
-        if len(content) > self.settings.vibe_message_limit:
-            raise ValueError("Vibe Session messages must not exceed the bounded 4,000 character context")
-        response = await self._request("POST", f"/sessions/{session_id}/messages", json={"content": content})
-        return MessageAccepted.model_validate(response.json())
+        protected_content = f"{content}{_RESEARCH_SAFETY_INSTRUCTIONS}"
+        if len(protected_content) > self.settings.vibe_message_limit:
+            raise ValueError(
+                "Vibe Session messages, including required research safety instructions, "
+                f"must not exceed the bounded {self.settings.vibe_message_limit:,} character context"
+            )
+        response = await self._request("POST", f"/sessions/{session_id}/messages", json={"content": protected_content})
+        return self._decode_model(response, MessageAccepted)
 
     async def list_messages(self, session_id: str, limit: int = 100) -> list[MessageRecord]:
         response = await self._request("GET", f"/sessions/{session_id}/messages", params={"limit": limit})
-        return [MessageRecord.model_validate(item) for item in response.json()]
+        payload = self._decode_json(response)
+        if not isinstance(payload, list):
+            raise self._contract_error("Vibe-Trading returned an incompatible messages response")
+        try:
+            return [MessageRecord.model_validate(item) for item in payload]
+        except (TypeError, ValidationError) as exc:
+            raise self._contract_error("Vibe-Trading returned an incompatible messages response") from exc
 
     async def cancel(self, session_id: str) -> CancelResult:
         response = await self._request("POST", f"/sessions/{session_id}/cancel")
-        return CancelResult.model_validate(response.json())
+        return self._decode_model(response, CancelResult)
 
     async def mint_sse_ticket(self) -> SseTicket:
         response = await self._request("POST", "/auth/sse-ticket")
-        return SseTicket.model_validate(response.json())
+        return self._decode_model(response, SseTicket)

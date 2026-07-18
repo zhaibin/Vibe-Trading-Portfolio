@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -68,6 +70,12 @@ async def test_research_calls_use_public_contract_and_fixed_risk_tier(gateway: V
     assert session_route.calls[0].request.content == b'{"title":"Portfolio compatibility probe","config":{}}'
     assert b'"risk_tier":"research_general"' in goal_route.calls[0].request.content
     assert b"mcpServers" not in session_route.calls[0].request.content
+    message_payload = json.loads(message_route.calls[0].request.content)
+    assert message_payload["content"].startswith("Read-only compatibility check")
+    assert "Do not place orders" in message_payload["content"]
+    assert "broker writes" in message_payload["content"]
+    assert "execute trades" in message_payload["content"]
+    assert len(message_payload["content"]) <= gateway.settings.vibe_message_limit
     assert message_route.called
     await gateway.close()
 
@@ -90,6 +98,46 @@ async def test_maps_auth_and_offline_failures(gateway: VibeGateway) -> None:
 async def test_rejects_messages_larger_than_bounded_context(gateway: VibeGateway) -> None:
     with pytest.raises(ValueError, match="4,000"):
         await gateway.send_message("session-1", "x" * 4001)
+    await gateway.close()
+
+
+async def test_rejects_message_when_safety_instructions_exceed_configured_limit() -> None:
+    gateway = VibeGateway(Settings(vibe_api_key="test-key", vibe_message_limit=100))
+
+    with pytest.raises(ValueError, match="100"):
+        await gateway.send_message("session-1", "x" * 100)
+    await gateway.close()
+
+
+@respx.mock
+async def test_maps_malformed_json_to_contract_error(gateway: VibeGateway) -> None:
+    respx.get("http://127.0.0.1:8899/api").mock(return_value=httpx.Response(200, content=b"not json"))
+
+    with pytest.raises(GatewayError) as error:
+        await gateway.api_info()
+    assert error.value.code is GatewayErrorCode.VIBE_CONTRACT_ERROR
+    await gateway.close()
+
+
+@respx.mock
+async def test_maps_invalid_dto_payload_to_contract_error(gateway: VibeGateway) -> None:
+    respx.get("http://127.0.0.1:8899/api").mock(return_value=httpx.Response(200, json={"service": "Vibe-Trading API"}))
+
+    with pytest.raises(GatewayError) as error:
+        await gateway.api_info()
+    assert error.value.code is GatewayErrorCode.VIBE_CONTRACT_ERROR
+    await gateway.close()
+
+
+@respx.mock
+async def test_maps_non_list_messages_to_contract_error(gateway: VibeGateway) -> None:
+    respx.get(url__startswith="http://127.0.0.1:8899/sessions/session-1/messages").mock(
+        return_value=httpx.Response(200, json={"message_id": "message-1"})
+    )
+
+    with pytest.raises(GatewayError) as error:
+        await gateway.list_messages("session-1")
+    assert error.value.code is GatewayErrorCode.VIBE_CONTRACT_ERROR
     await gateway.close()
 
 
