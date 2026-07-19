@@ -15,7 +15,7 @@ The following state was verified after local stabilization testing on 2026-07-19
 - Target/integration branch: `main`
 - Last verified active branch: `main`
 - Local stabilization integration: `main` fast-forwarded from `3f3e081` to `96aeb56` after the merged-result gate passed
-- Last verified integrated head before this handoff update: `96aeb56` (`docs: record live contract verification`)
+- Last verified integrated head before remote publication: `6b1ee52` (`Merge remote-tracking branch 'origin/main'`)
 - Live stabilization commits: `c15c12f` (`fix: poll for runtime terminal proof`), `7a26e3a` (`fix: validate goal-aware MCP probe events`), and `ef6938c` (`fix: retry runtime cancel registration race`)
 - Live stabilization design/plan commits: `e1316f7`, `1d207b9`, and `3f3e081`
 - Integrated handoff branch: `docs/new-session-handoff`
@@ -25,7 +25,7 @@ The following state was verified after local stabilization testing on 2026-07-19
 - Handoff design commit: `9d4dfd5` (`docs: design new-session handoff`)
 - Plan commit: `fb1e81e` (`docs: plan new-session handoff`)
 - Remote: `origin` is `https://github.com/zhaibin/Vibe-Trading-Portfolio.git`; `git ls-remote --symref origin HEAD` reported remote `main` at `cab3ffbcb7365bd788876943638538895a7899fa` on 2026-07-19
-- Remote reconciliation: `origin/main` was fetched successfully and has no common ancestor with local `main`; its only commit is `cab3ffb` (`Initial commit`) containing only `LICENSE`. No unrelated-history merge or push was attempted.
+- Remote reconciliation: the unrelated `origin/main` initial history was preserved by merging `cab3ffb` (`Initial commit`) as the second parent of `6b1ee52`; its `LICENSE` is now tracked locally. No force-push was used.
 - Upstream Vibe baseline: `0.1.11` at `67a393e4574865e8ab9b1b3f9a9fd1d7ab337343`
 - Supported Vibe range: `>=0.1.11,<0.2.0`
 
@@ -106,18 +106,18 @@ The route-only, live runtime, and full MCP commands are intentionally documented
 
 ## Current decisions and risks
 
-- The sidecar has a configured `origin`, but remote `main` is an unrelated one-file history. Choose an explicit remote-history strategy before push; do not use `--allow-unrelated-histories`, force-push, or discard the remote `LICENSE` without review and approval.
+- The sidecar preserves the former unrelated remote initial commit and `LICENSE` through merge commit `6b1ee52`. Future pushes can use normal fast-forward semantics; force-push remains unnecessary.
 - Vibe compatibility is intentionally limited to `>=0.1.11,<0.2.0`; widening it requires updated fixtures and passing layered gates.
 - Live runtime and MCP results are explicit dated local evidence, not a substitute for rerunning them after dependency, provider, operator configuration, or upstream changes.
 - The next milestone must define privacy, retention, precision, currency, and migration rules before storing personal holdings.
 
 ## Current blockers
 
-Current code/test blockers: none known. Local branch integration is complete. Remote publication is blocked on an explicit decision for the unrelated `origin/main` history; no push has been attempted. Future holdings-domain work still requires a separately approved design.
+Current code/test blockers: none known. Local branch integration and remote-history reconciliation are complete. Future holdings-domain work still requires a separately approved design.
 
 ## Recommended next step
 
-First decide how to publish local `main` against the unrelated remote `LICENSE` history. A safe decision should explicitly choose between importing/recreating the license in local history and replacing the remote history, or another reviewed repository-initialization approach. After remote publication is resolved, propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. That design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe.
+After confirming normal remote publication, propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. That design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe.
 
 ## End-of-session update checklist
 
