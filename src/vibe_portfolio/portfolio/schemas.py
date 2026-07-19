@@ -13,6 +13,7 @@ from vibe_portfolio.portfolio.domain import (
     Currency,
     DomainValidationError,
     Market,
+    QuoteState,
     parse_money,
     parse_price,
     parse_quantity,
@@ -134,6 +135,44 @@ class PositionView(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived_at: datetime | None
+
+
+class SummaryPosition(BaseModel):
+    position_id: str
+    account_id: str
+    instrument_id: str
+    quantity: DecimalOutput
+    average_cost: DecimalOutput
+    position_cost: DecimalOutput
+    quote_price: DecimalOutput | None
+    market_value: DecimalOutput | None
+    unrealized_pnl: DecimalOutput | None
+    unrealized_pnl_pct: DecimalOutput | None
+    allocation: DecimalOutput | None
+    quote_state: QuoteState
+    quote_provider: str | None
+    quote_as_of: datetime | None
+    quote_fetched_at: datetime | None
+
+
+class PortfolioSummary(BaseModel):
+    currency: Currency
+    account_count: int
+    position_count: int
+    valued_count: int
+    stale_count: int
+    unvalued_count: int
+    market_value: DecimalOutput
+    position_cost: DecimalOutput
+    valued_position_cost: DecimalOutput
+    unvalued_cost: DecimalOutput
+    unrealized_pnl: DecimalOutput
+    unrealized_pnl_pct: DecimalOutput | None
+    known_cash: DecimalOutput
+    unknown_cash_account_count: int
+    total_value: DecimalOutput
+    estimated: bool
+    positions: list[SummaryPosition]
 
 
 T = TypeVar("T")

@@ -20,8 +20,10 @@ from vibe_portfolio.portfolio.tables import (
     InstrumentCandidateRow,
     InstrumentProviderSymbolRow,
     InstrumentRow,
+    LatestQuoteRow,
     PositionRow,
     PositionVersionRow,
+    QuoteRefreshItemRow,
 )
 
 IDEMPOTENCY_TTL: Final = timedelta(hours=24)
@@ -101,6 +103,14 @@ class AccountArchived(RepositoryError):
 class IdempotencyClaim:
     row: IdempotencyRow
     completed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryRecords:
+    accounts: list[AccountRow]
+    positions: list[PositionRow]
+    quotes: dict[str, LatestQuoteRow]
+    latest_attempts: dict[str, QuoteRefreshItemRow]
 
 
 def hash_idempotency_key(key: str) -> str:
@@ -636,3 +646,52 @@ class PortfolioRepository:
         if cursor is not None:
             statement = statement.where(PositionRow.id > cursor)
         return list((await session.scalars(statement.limit(limit + 1))).all())
+
+    async def summary_records(self, session: AsyncSession, currency: str) -> SummaryRecords:
+        accounts = list(
+            (
+                await session.scalars(
+                    select(AccountRow).where(AccountRow.currency == currency, AccountRow.archived_at.is_(None))
+                )
+            ).all()
+        )
+        account_ids = [account.id for account in accounts]
+        if not account_ids:
+            return SummaryRecords(accounts=accounts, positions=[], quotes={}, latest_attempts={})
+
+        positions = list(
+            (
+                await session.scalars(
+                    select(PositionRow).where(
+                        PositionRow.account_id.in_(account_ids),
+                        PositionRow.archived_at.is_(None),
+                    ).order_by(PositionRow.id)
+                )
+            ).all()
+        )
+        instrument_ids = {position.instrument_id for position in positions}
+        if not instrument_ids:
+            return SummaryRecords(accounts=accounts, positions=positions, quotes={}, latest_attempts={})
+
+        quotes = {
+            quote.instrument_id: quote
+            for quote in (
+                await session.scalars(select(LatestQuoteRow).where(LatestQuoteRow.instrument_id.in_(instrument_ids)))
+            ).all()
+        }
+        attempts = (
+            await session.scalars(
+                select(QuoteRefreshItemRow)
+                .where(QuoteRefreshItemRow.instrument_id.in_(instrument_ids))
+                .order_by(QuoteRefreshItemRow.created_at.desc(), QuoteRefreshItemRow.run_id.desc())
+            )
+        ).all()
+        latest_attempts: dict[str, QuoteRefreshItemRow] = {}
+        for attempt in attempts:
+            latest_attempts.setdefault(attempt.instrument_id, attempt)
+        return SummaryRecords(
+            accounts=accounts,
+            positions=positions,
+            quotes=quotes,
+            latest_attempts=latest_attempts,
+        )

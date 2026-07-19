@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -21,6 +22,7 @@ from vibe_portfolio.portfolio.schemas import (
     ErrorEnvelope,
     InstrumentConfirm,
     InstrumentView,
+    PortfolioSummary,
     PositionCreate,
     PositionPatch,
     PositionView,
@@ -214,6 +216,17 @@ def build_portfolio_router(service: PortfolioService) -> APIRouter:
                 limit=limit,
             )
             return CursorPage(items=[_position_view(position) for position in positions], next_cursor=next_cursor)
+        except DatabaseBusyError:
+            return api_error("DATABASE_BUSY", 503)
+        except DatabaseStartupError:
+            return api_error("PORTFOLIO_UNAVAILABLE", 500)
+        except Exception:
+            return api_error("PORTFOLIO_UNAVAILABLE", 500)
+
+    @router.get("/portfolio/summary", response_model=PortfolioSummary)
+    async def portfolio_summary(currency: Currency) -> object:
+        try:
+            return await service.summary(currency, datetime.now(UTC))
         except DatabaseBusyError:
             return api_error("DATABASE_BUSY", 503)
         except DatabaseStartupError:

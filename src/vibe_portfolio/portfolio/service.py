@@ -1,10 +1,12 @@
-"""Account application rules and transaction boundaries."""
+"""Portfolio application rules and transaction boundaries."""
 
 import json
 import re
 import unicodedata
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 from hashlib import sha256
 from uuid import UUID
 
@@ -16,9 +18,11 @@ from vibe_portfolio.portfolio.domain import (
     Currency,
     DomainValidationError,
     Market,
+    QuoteState,
     canonical_symbol,
     parse_money,
     parse_quantity,
+    quote_state,
 )
 from vibe_portfolio.portfolio.repository import (
     CANDIDATE_TTL,
@@ -33,26 +37,198 @@ from vibe_portfolio.portfolio.schemas import (
     AccountView,
     InstrumentConfirm,
     InstrumentView,
+    PortfolioSummary,
     PositionCreate,
     PositionPatch,
     PositionView,
+    SummaryPosition,
 )
 from vibe_portfolio.portfolio.tables import (
     AccountRow,
     AccountVersionRow,
     InstrumentCandidateRow,
     InstrumentRow,
+    LatestQuoteRow,
     PositionRow,
     PositionVersionRow,
+    QuoteRefreshItemRow,
 )
 
 _WHITESPACE = re.compile(r"\s+")
+_MONEY_QUANTUM = Decimal("0.000001")
+_QUANTITY_QUANTUM = Decimal("0.00000001")
+_RATIO_QUANTUM = Decimal("0.000001")
+_CALCULATION_PRECISION = 60
 
 
 @dataclass(frozen=True, slots=True)
 class PortfolioResponse:
     status: int
     body: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _CalculatedPosition:
+    position: PositionRow
+    position_cost: Decimal
+    quote: LatestQuoteRow | None
+    state: QuoteState
+    market_value: Decimal | None
+    unrealized_pnl: Decimal | None
+
+
+def _quantize_display(value: Decimal, quantum: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _CALCULATION_PRECISION
+        return value.quantize(quantum, rounding=ROUND_HALF_EVEN)
+
+
+def display_money(value: Decimal) -> Decimal:
+    return _quantize_display(value, _MONEY_QUANTUM)
+
+
+def display_quantity(value: Decimal) -> Decimal:
+    return _quantize_display(value, _QUANTITY_QUANTUM)
+
+
+def display_ratio(value: Decimal) -> Decimal:
+    return _quantize_display(value, _RATIO_QUANTUM)
+
+
+def _aware(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
+def calculate_summary(
+    *,
+    currency: Currency,
+    accounts: Sequence[AccountRow],
+    positions: Sequence[PositionRow],
+    quotes: Mapping[str, LatestQuoteRow],
+    latest_attempts: Mapping[str, QuoteRefreshItemRow],
+    now: datetime,
+) -> PortfolioSummary:
+    if not _aware(now):
+        raise ValueError("summary clock must be timezone-aware")
+
+    active_accounts = {
+        account.id: account
+        for account in accounts
+        if account.archived_at is None and account.currency == currency.value
+    }
+    active_positions = [
+        position
+        for position in positions
+        if position.archived_at is None and position.account_id in active_accounts
+    ]
+
+    with localcontext() as context:
+        context.prec = _CALCULATION_PRECISION
+        known_cash = sum(
+            (account.cash_balance for account in active_accounts.values() if account.cash_balance is not None),
+            Decimal("0"),
+        )
+        unknown_cash_count = sum(account.cash_balance is None for account in active_accounts.values())
+        position_cost = Decimal("0")
+        market_value = Decimal("0")
+        valued_position_cost = Decimal("0")
+        stale_count = 0
+        unvalued_count = 0
+        calculated: list[_CalculatedPosition] = []
+
+        for position in active_positions:
+            cost = position.quantity * position.average_cost
+            position_cost += cost
+            candidate_quote = quotes.get(position.instrument_id)
+            valid_quote = (
+                candidate_quote is not None
+                and candidate_quote.currency == currency.value
+                and candidate_quote.price > 0
+                and _aware(candidate_quote.as_of)
+                and _aware(candidate_quote.fetched_at)
+            )
+            if not valid_quote:
+                unvalued_count += 1
+                calculated.append(
+                    _CalculatedPosition(position, cost, None, QuoteState.UNAVAILABLE, None, None)
+                )
+                continue
+
+            assert candidate_quote is not None
+            latest_attempt = latest_attempts.get(position.instrument_id)
+            attempt_succeeded = (
+                latest_attempt is not None
+                and latest_attempt.outcome == "updated"
+                and latest_attempt.run_id == candidate_quote.refresh_run_id
+                and candidate_quote.as_of <= now
+            )
+            state = quote_state(candidate_quote.as_of, latest_attempt_succeeded=attempt_succeeded, now=now)
+            value = position.quantity * candidate_quote.price
+            pnl = value - cost
+            market_value += value
+            valued_position_cost += cost
+            if state is QuoteState.STALE:
+                stale_count += 1
+            calculated.append(_CalculatedPosition(position, cost, candidate_quote, state, value, pnl))
+
+        aggregate_pnl = market_value - valued_position_cost
+        aggregate_pnl_pct = (
+            None if valued_position_cost == 0 else display_ratio(aggregate_pnl / valued_position_cost)
+        )
+        total_value = market_value + known_cash
+
+        summary_positions: list[SummaryPosition] = []
+        for item in calculated:
+            row_pnl_pct = (
+                None
+                if item.unrealized_pnl is None or item.position_cost == 0
+                else display_ratio(item.unrealized_pnl / item.position_cost)
+            )
+            allocation = (
+                None
+                if item.market_value is None or market_value == 0
+                else display_ratio(item.market_value / market_value)
+            )
+            quote_row = item.quote
+            summary_positions.append(
+                SummaryPosition(
+                    position_id=item.position.id,
+                    account_id=item.position.account_id,
+                    instrument_id=item.position.instrument_id,
+                    quantity=display_quantity(item.position.quantity),
+                    average_cost=display_money(item.position.average_cost),
+                    position_cost=display_money(item.position_cost),
+                    quote_price=None if quote_row is None else display_money(quote_row.price),
+                    market_value=None if item.market_value is None else display_money(item.market_value),
+                    unrealized_pnl=None if item.unrealized_pnl is None else display_money(item.unrealized_pnl),
+                    unrealized_pnl_pct=row_pnl_pct,
+                    allocation=allocation,
+                    quote_state=item.state,
+                    quote_provider=None if quote_row is None else quote_row.provider,
+                    quote_as_of=None if quote_row is None else quote_row.as_of,
+                    quote_fetched_at=None if quote_row is None else quote_row.fetched_at,
+                )
+            )
+
+    return PortfolioSummary(
+        currency=currency,
+        account_count=len(active_accounts),
+        position_count=len(active_positions),
+        valued_count=len(active_positions) - unvalued_count,
+        stale_count=stale_count,
+        unvalued_count=unvalued_count,
+        market_value=display_money(market_value),
+        position_cost=display_money(position_cost),
+        valued_position_cost=display_money(valued_position_cost),
+        unvalued_cost=display_money(position_cost - valued_position_cost),
+        unrealized_pnl=display_money(aggregate_pnl),
+        unrealized_pnl_pct=aggregate_pnl_pct,
+        known_cash=display_money(known_cash),
+        unknown_cash_account_count=unknown_cash_count,
+        total_value=display_money(total_value),
+        estimated=unknown_cash_count > 0 or stale_count > 0 or unvalued_count > 0,
+        positions=summary_positions,
+    )
 
 
 def normalize_account_name(value: str) -> str:
@@ -396,3 +572,15 @@ class PortfolioService:
             )
         page = rows[:limit]
         return page, page[-1].id if len(rows) > limit else None
+
+    async def summary(self, currency: Currency, now: datetime) -> PortfolioSummary:
+        async with self.database.session() as session:
+            records = await self.repository.summary_records(session, currency.value)
+        return calculate_summary(
+            currency=currency,
+            accounts=records.accounts,
+            positions=records.positions,
+            quotes=records.quotes,
+            latest_attempts=records.latest_attempts,
+            now=now,
+        )
