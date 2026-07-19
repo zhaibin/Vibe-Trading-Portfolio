@@ -1,0 +1,18 @@
+{
+  "QuotationCodeTable": {
+    "Data": [
+      {"Code": "699991", "Name": "虚构沪市样本", "MktNum": "1", "QuoteID": "1.699991", "SecurityTypeName": "沪A"},
+      {"Code": "099991", "Name": "虚构深市样本", "MktNum": "0", "QuoteID": "0.099991", "SecurityTypeName": "深A"},
+      {"Code": "499991", "Name": "虚构北市四样本", "MktNum": "0", "QuoteID": "0.499991", "SecurityTypeName": "北证A股"},
+      {"Code": "899991", "Name": "虚构北市八样本", "MktNum": "0", "QuoteID": "0.899991", "SecurityTypeName": "北证A股"},
+      {"Code": "929991", "Name": "虚构北市九二样本", "MktNum": "0", "QuoteID": "0.929991", "SecurityTypeName": "北证A股"},
+      {"Code": "9999", "Name": "虚构港股样本", "MktNum": "116", "QuoteID": "116.9999", "SecurityTypeName": "港股"},
+      {"Code": "DEMO", "Name": "Fictional Demo Systems", "MktNum": "105", "QuoteID": "105.DEMO", "SecurityTypeName": "美股"},
+      {"Code": "ALPHA", "Name": "Fictional Alpha Labs", "MktNum": "106", "QuoteID": "106.ALPHA", "SecurityTypeName": "美股"},
+      {"Code": "BETA", "Name": "Fictional Beta Works", "MktNum": "107", "QuoteID": "107.BETA", "SecurityTypeName": "ETF"},
+      {"Code": "699992", "Name": "Unsupported Index", "MktNum": "1", "QuoteID": "1.699992", "SecurityTypeName": "指数"},
+      {"Code": "UNKNOWN", "Name": "Unknown Market", "MktNum": "999", "QuoteID": "999.UNKNOWN", "SecurityTypeName": "美股"},
+      {"Code": "BAD", "Name": "Bad Mapping", "MktNum": "105", "QuoteID": "105.OTHER", "SecurityTypeName": "美股"}
+    ]
+  }
+}

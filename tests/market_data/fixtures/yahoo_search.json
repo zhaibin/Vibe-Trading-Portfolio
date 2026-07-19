@@ -1,0 +1,10 @@
+{
+  "quotes": [
+    {"symbol": "DEMO", "shortname": "Fictional Demo Systems", "quoteType": "EQUITY", "exchange": "NMS", "currency": "USD"},
+    {"symbol": "0999.HK", "shortname": "虚构港股样本", "quoteType": "EQUITY", "exchange": "HKG", "currency": "HKD"},
+    {"symbol": "ETFDEMO", "shortname": "Fictional Demonstration ETF", "quoteType": "ETF", "exchange": "PCX", "currency": "USD"},
+    {"symbol": "COINDEMO", "shortname": "Unsupported Crypto", "quoteType": "CRYPTOCURRENCY", "exchange": "CCC", "currency": "USD"},
+    {"symbol": "WRONG", "shortname": "Wrong Currency", "quoteType": "EQUITY", "exchange": "NMS", "currency": "EUR"},
+    {"symbol": "UNKNOWN", "shortname": "Unknown Exchange", "quoteType": "EQUITY", "exchange": "ZZZ", "currency": "USD"}
+  ]
+}
