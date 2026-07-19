@@ -88,10 +88,140 @@ h1 {
   margin-top: 0;
 }
 
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  width: fit-content;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #8c9b90;
+  border-radius: 0.35rem;
+  color: #102d20;
+  background: #fff;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled),
+button:focus-visible {
+  border-color: #174b32;
+  background: #e2eee6;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.stack-form,
+.candidate-list,
+.record-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.stack-form {
+  max-width: 34rem;
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid #d7ded5;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.stack-form h2,
+.stack-form h3 {
+  margin: 0;
+}
+
+.stack-form input,
+.stack-form select,
+.stack-form textarea,
+.inline-form input {
+  width: 100%;
+  padding: 0.6rem;
+  border: 1px solid #aab5ac;
+  border-radius: 0.35rem;
+  background: #fff;
+}
+
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr) auto;
+  gap: 0.55rem;
+  max-width: 34rem;
+}
+
+.inline-form label {
+  grid-column: 1 / -1;
+}
+
+.record-list {
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+}
+
+.record-card,
+.candidate-card,
+.empty-state,
+.inline-confirmation,
+.status-message {
+  padding: 1rem;
+  border: 1px solid #d7ded5;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.record-card {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.candidate-list {
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  margin: 1rem 0;
+}
+
+.candidate-card h3,
+.status-message h2 {
+  margin-top: 0;
+}
+
+.inline-confirmation {
+  border-color: #ba741c;
+}
+
+.field-error,
+.status-error {
+  color: #8b1e1e;
+}
+
+.status-success {
+  border-color: #49845f;
+}
+
+.status-error {
+  border-color: #b74b4b;
+}
+
 @media (max-width: 36rem) {
   .app-header {
     align-items: flex-start;
     flex-direction: column;
     gap: 0.8rem;
+  }
+
+  .inline-form {
+    grid-template-columns: 1fr;
   }
 }
