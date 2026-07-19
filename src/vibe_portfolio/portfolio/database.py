@@ -3,12 +3,15 @@
 import asyncio
 import os
 import sqlite3
+import stat
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import resources
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from alembic import command
 from alembic.config import Config
@@ -42,51 +45,136 @@ class DatabaseUpgradeResult:
     revision: str
 
 
+def _is_busy(error: BaseException) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        message = str(current).lower()
+        if "database is locked" in message or "database is busy" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _raise_startup_or_busy(error: BaseException, code: str) -> None:
+    if _is_busy(error):
+        raise DatabaseBusyError() from error
+    raise DatabaseStartupError(code) from error
+
+
 def _set_owner_only_mode(path: Path, mode: int) -> None:
+    os.chmod(path, mode)
+    actual_mode = stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode)
+    if actual_mode != mode:
+        raise OSError(f"could not enforce mode {mode:o}")
+
+
+def _assert_safe_path(path: Path) -> None:
+    for component in (path.parent, *path.parent.parents):
+        try:
+            component_mode = os.lstat(component).st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(component_mode):
+            raise DatabaseStartupError("DATABASE_PATH_UNSAFE")
     try:
-        path.chmod(mode)
-    except OSError:
-        # Windows and some mounted filesystems do not support POSIX permissions.
-        pass
+        path_mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(path_mode) or not stat.S_ISREG(path_mode):
+        raise DatabaseStartupError("DATABASE_PATH_UNSAFE")
 
 
 def validate_database_path(path: Path) -> None:
-    """Create a private parent directory and reject symlink traversal."""
-    if path.is_symlink() or any(parent.is_symlink() for parent in (path.parent, *path.parent.parents)):
-        raise DatabaseStartupError("DATABASE_PATH_UNSAFE")
+    """Create and enforce a private non-symlinked local storage location."""
+    _assert_safe_path(path)
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _assert_safe_path(path)
         _set_owner_only_mode(path.parent, 0o700)
+    except DatabaseStartupError:
+        raise
     except OSError as error:
         raise DatabaseStartupError("DATABASE_PATH_UNSAFE") from error
-    if path.exists() and not path.is_file():
-        raise DatabaseStartupError("DATABASE_PATH_UNSAFE")
 
 
-def _configuration(path: Path) -> Config:
-    config = Config("alembic.ini")
-    config.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
+def _create_database_file(path: Path) -> None:
+    if path.exists():
+        return
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        _assert_safe_path(path)
+        return
+    except OSError as error:
+        raise DatabaseStartupError("DATABASE_PATH_UNSAFE") from error
+    else:
+        os.close(descriptor)
+    try:
+        _assert_safe_path(path)
+        _set_owner_only_mode(path, 0o600)
+    except (DatabaseStartupError, OSError) as error:
+        raise DatabaseStartupError("DATABASE_PATH_UNSAFE") from error
+
+
+def _database_uri(path: Path) -> str:
+    return f"file:{quote(path.absolute().as_posix())}?mode=rw"
+
+
+def _open_connection(path: Path, busy_timeout_ms: int) -> sqlite3.Connection:
+    _assert_safe_path(path)
+    connection = sqlite3.connect(_database_uri(path), uri=True, timeout=busy_timeout_ms / 1000)
+    try:
+        _assert_safe_path(path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
+def _migrations_directory() -> Path:
+    directory = resources.files("vibe_portfolio.portfolio").joinpath("migrations")
+    path = Path(str(directory))
+    if not path.is_dir():
+        raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+    return path
+
+
+def _configuration(path: Path, busy_timeout_ms: int) -> Config:
+    config = Config()
+    config.set_main_option("script_location", str(_migrations_directory()))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{path.absolute()}")
+    config.attributes["portfolio_busy_timeout_ms"] = busy_timeout_ms
     return config
 
 
-def _integrity_check(path: Path) -> None:
+def _integrity_check(path: Path, busy_timeout_ms: int) -> None:
     try:
-        with closing(sqlite3.connect(path)) as connection:
+        with closing(_open_connection(path, busy_timeout_ms)) as connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()
+    except DatabaseStartupError:
+        raise
     except sqlite3.DatabaseError as error:
-        raise DatabaseStartupError("DATABASE_INTEGRITY_FAILED") from error
+        _raise_startup_or_busy(error, "DATABASE_INTEGRITY_FAILED")
     if result != ("ok",):
         raise DatabaseStartupError("DATABASE_INTEGRITY_FAILED")
 
 
-def _database_revision(path: Path) -> str | None:
-    with closing(sqlite3.connect(path)) as connection:
-        table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
-        ).fetchone()
-        if table is None:
-            return None
-        revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+def _database_revision(path: Path, busy_timeout_ms: int) -> str | None:
+    try:
+        with closing(_open_connection(path, busy_timeout_ms)) as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
+            ).fetchone()
+            if table is None:
+                return None
+            revisions = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+    except DatabaseStartupError:
+        raise
+    except sqlite3.DatabaseError as error:
+        _raise_startup_or_busy(error, "DATABASE_SCHEMA_UNSUPPORTED")
     if len(revisions) != 1 or not isinstance(revisions[0][0], str):
         raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
     return revisions[0][0]
@@ -97,71 +185,75 @@ def _backup_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.backup-{timestamp}-{os.getpid()}.db")
 
 
-def _copy_database(source: Path, destination: Path) -> None:
+def _copy_database(source: Path, destination: Path, busy_timeout_ms: int) -> None:
+    _create_database_file(destination)
     with (
-        closing(sqlite3.connect(source)) as source_connection,
-        closing(sqlite3.connect(destination)) as destination_connection,
+        closing(_open_connection(source, busy_timeout_ms)) as source_connection,
+        closing(_open_connection(destination, busy_timeout_ms)) as destination_connection,
     ):
         source_connection.backup(destination_connection)
+    _set_owner_only_mode(destination, 0o600)
 
 
-def _is_busy(error: BaseException) -> bool:
-    message = str(error).lower()
-    return "database is locked" in message or "database is busy" in message
+def _restore_backup(backup_path: Path, path: Path, busy_timeout_ms: int, original_error: BaseException) -> None:
+    try:
+        _copy_database(backup_path, path, busy_timeout_ms)
+    except BaseException:
+        raise DatabaseStartupError("DATABASE_MIGRATION_FAILED") from original_error
 
 
-def upgrade_database(path: Path) -> DatabaseUpgradeResult:
+def upgrade_database(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> DatabaseUpgradeResult:
     """Verify and migrate *path*, retaining a verified backup before a schema change."""
     validate_database_path(path)
     existed = path.exists()
-    _integrity_check(path)
-    config = _configuration(path)
-    head = ScriptDirectory.from_config(config).get_current_head()
-    if head is None:
-        raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
-    revision = _database_revision(path)
-    known_revisions = {revision.revision for revision in ScriptDirectory.from_config(config).walk_revisions()}
-    if revision is not None and revision not in known_revisions:
-        raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
-    if revision == head:
-        _set_owner_only_mode(path, 0o600)
-        return DatabaseUpgradeResult(backup_path=None, revision=head)
-
-    backup_path: Path | None = None
-    if existed and path.stat().st_size > 0:
-        backup_path = _backup_path(path)
-        try:
-            _copy_database(path, backup_path)
-            _set_owner_only_mode(backup_path, 0o600)
-            _integrity_check(backup_path)
-        except (OSError, sqlite3.DatabaseError, DatabaseStartupError) as error:
-            raise DatabaseStartupError("DATABASE_BACKUP_FAILED") from error
-
+    _create_database_file(path)
     try:
-        command.upgrade(config, "head")
-        _integrity_check(path)
-        if _database_revision(path) != head:
+        _integrity_check(path, busy_timeout_ms)
+        config = _configuration(path, busy_timeout_ms)
+        scripts = ScriptDirectory.from_config(config)
+        head = scripts.get_current_head()
+        if head is None:
             raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
-    except DatabaseStartupError:
-        if backup_path is not None:
-            _copy_database(backup_path, path)
-        raise
-    except Exception as error:
-        if backup_path is not None:
+        revision = _database_revision(path, busy_timeout_ms)
+        known_revisions = {known_revision.revision for known_revision in scripts.walk_revisions()}
+        if revision is not None and revision not in known_revisions:
+            raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+        if revision == head:
+            _set_owner_only_mode(path, 0o600)
+            return DatabaseUpgradeResult(backup_path=None, revision=head)
+
+        backup_path: Path | None = None
+        if existed and path.stat().st_size > 0:
+            backup_path = _backup_path(path)
             try:
-                _copy_database(backup_path, path)
-            except (OSError, sqlite3.DatabaseError) as restore_error:
-                raise DatabaseStartupError("DATABASE_MIGRATION_FAILED") from restore_error
-        if _is_busy(error):
-            raise DatabaseBusyError() from error
-        raise DatabaseStartupError("DATABASE_MIGRATION_FAILED") from error
+                _copy_database(path, backup_path, busy_timeout_ms)
+                _integrity_check(backup_path, busy_timeout_ms)
+            except BaseException as error:
+                _raise_startup_or_busy(error, "DATABASE_BACKUP_FAILED")
+
+        try:
+            command.upgrade(config, "head")
+            _integrity_check(path, busy_timeout_ms)
+            if _database_revision(path, busy_timeout_ms) != head:
+                raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+        except BaseException as error:
+            if backup_path is not None:
+                _restore_backup(backup_path, path, busy_timeout_ms, error)
+            if isinstance(error, (DatabaseStartupError, DatabaseBusyError)):
+                raise
+            _raise_startup_or_busy(error, "DATABASE_MIGRATION_FAILED")
+    except (DatabaseStartupError, DatabaseBusyError):
+        raise
+    except BaseException as error:
+        _raise_startup_or_busy(error, "DATABASE_STARTUP_FAILED")
 
     _set_owner_only_mode(path, 0o600)
+    assert head is not None
     return DatabaseUpgradeResult(backup_path=backup_path, revision=head)
 
 
 def sqlite_async_url(path: Path) -> str:
-    return f"sqlite+aiosqlite:///{path.resolve()}"
+    return f"sqlite+aiosqlite:///{path.absolute()}"
 
 
 def enable_sqlite_pragmas(dbapi_connection: Any, _: object, *, busy_timeout_ms: int) -> None:
@@ -184,23 +276,26 @@ class Database:
         self._sessions: async_sessionmaker[AsyncSession] | None = None
 
     async def start(self) -> None:
-        validate_database_path(self.path)
-        await asyncio.to_thread(upgrade_database, self.path)
-        self.engine = create_async_engine(sqlite_async_url(self.path), pool_pre_ping=True)
-        event.listen(
-            self.engine.sync_engine,
-            "connect",
-            lambda connection, record: enable_sqlite_pragmas(connection, record, busy_timeout_ms=self.busy_timeout_ms),
-        )
-        self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
+        await self.close()
         try:
+            validate_database_path(self.path)
+            await asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms)
+            self.engine = create_async_engine(sqlite_async_url(self.path), pool_pre_ping=True)
+            event.listen(
+                self.engine.sync_engine,
+                "connect",
+                lambda connection, record: enable_sqlite_pragmas(
+                    connection, record, busy_timeout_ms=self.busy_timeout_ms
+                ),
+            )
+            self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
             async with self.engine.connect() as connection:
                 await connection.execute(text("select 1"))
-        except OperationalError as error:
+        except BaseException as error:
             await self.close()
-            if _is_busy(error):
-                raise DatabaseBusyError() from error
-            raise DatabaseStartupError("DATABASE_STARTUP_FAILED") from error
+            if isinstance(error, (DatabaseStartupError, DatabaseBusyError)):
+                raise
+            _raise_startup_or_busy(error, "DATABASE_STARTUP_FAILED")
 
     async def close(self) -> None:
         if self.engine is not None:
