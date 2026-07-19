@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from types import MappingProxyType
 from typing import Literal, cast
@@ -88,6 +88,10 @@ class RefreshInProgress(RuntimeError):
 
 
 class RefreshRunNotFound(RuntimeError):
+    pass
+
+
+class RefreshOperationTimeout(RuntimeError):
     pass
 
 
@@ -312,12 +316,11 @@ class MarketDataService:
         self._repository = repository or PortfolioRepository()
         self._settings = settings or Settings()
         self._now = now or (lambda: datetime.now(UTC))
-        self._refresh_lock = asyncio.Lock()
 
     async def startup(self) -> None:
         now = self._aware_now()
         async with self._database.session() as session, session.begin():
-            await self._repository.abandon_running_refreshes(session, now)
+            await self._repository.recover_expired_refreshes(session, now)
             await self._repository.prune_expired(session, now)
 
     async def search(self, query: str, limit: int) -> list[InstrumentCandidate]:
@@ -361,12 +364,45 @@ class MarketDataService:
             rows = await self._repository.cache_candidates(
                 session, cast(Sequence[CandidateInput], candidates_to_cache), now=now
             )
+            await self._repository.prune_expired(session, now)
         return [
             replace(candidate, candidate_id=UUID(row.id))
             for candidate, row in zip(candidates_to_cache, rows, strict=True)
         ]
 
     async def refresh(self, scope: RefreshScope, idempotency_key: str) -> RefreshResult:
+        admitted: list[tuple[str, str]] = []
+        try:
+            async with asyncio.timeout(self._settings.market_operation_timeout_seconds):
+                return await self._execute_refresh(scope, idempotency_key, admitted)
+        except TimeoutError:
+            if not admitted:
+                raise RefreshOperationTimeout("QUOTE_UNAVAILABLE") from None
+            run_id, owner_token = admitted[0]
+            await self._shield_terminalize(run_id, owner_token, "REFRESH_TIMEOUT")
+            replay = await self._replay(
+                idempotency_key,
+                sha256(
+                    json.dumps(
+                        None if scope.instrument_ids is None else sorted(str(value) for value in scope.instrument_ids),
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            )
+            if replay is None:
+                raise RefreshOperationTimeout("QUOTE_UNAVAILABLE") from None
+            return replay
+        except asyncio.CancelledError:
+            if admitted:
+                await self._shield_terminalize(*admitted[0], "REFRESH_CANCELLED")
+            raise
+
+    async def _execute_refresh(
+        self,
+        scope: RefreshScope,
+        idempotency_key: str,
+        admitted: list[tuple[str, str]],
+    ) -> RefreshResult:
         if self._registry is None:
             raise RuntimeError("quote refresh requires the fixed provider registry")
         ids = self._validate_refresh_input(scope, idempotency_key)
@@ -376,63 +412,77 @@ class MarketDataService:
         replay = await self._replay(idempotency_key, request_hash)
         if replay is not None:
             return replay
-        if self._refresh_lock.locked():
-            raise RefreshInProgress(await self._running_id())
-        async with self._refresh_lock:
-            replay = await self._replay(idempotency_key, request_hash)
-            if replay is not None:
-                return replay
-            started_at = self._aware_now()
-            async with self._database.session() as session, session.begin():
+        async with self._database.session() as session:
+            records = await self._repository.active_refresh_instruments(session, ids)
+        if ids is not None and len(records) != len(ids):
+            raise RefreshValidationError("instrument_ids")
+        if len(records) > self._settings.market_max_batch_instruments:
+            raise RefreshValidationError("instrument_ids")
+        started_at = self._aware_now()
+        run_id = str(uuid4())
+        owner_token = str(uuid4())
+        scope_ids = sorted(record.instrument.id for record in records)
+        scope_json = json.dumps(scope_ids, separators=(",", ":"))
+        scope_hash = sha256(scope_json.encode()).hexdigest()
+        conflict_id: UUID | None = None
+        raced_replay: RefreshResult | None = None
+        claim = None
+        async with self._database.session() as session, session.begin():
+            created = await self._repository.create_refresh_run(
+                session,
+                run_id=run_id,
+                scope_hash=scope_hash,
+                scope_json=scope_json,
+                owner_token=owner_token,
+                started_at=started_at,
+                lease_expires_at=started_at + timedelta(seconds=self._settings.market_refresh_lease_seconds),
+            )
+            if not created:
                 running = await self._repository.running_refresh(session)
-                if running is not None:
-                    raise RefreshInProgress(UUID(running.id))
-                records = await self._repository.active_refresh_instruments(session, ids)
-                if ids is not None and len(records) != len(ids):
-                    raise RefreshValidationError("instrument_ids")
-                if len(records) > self._settings.market_max_batch_instruments:
-                    raise RefreshValidationError("instrument_ids")
+                conflict_id = None if running is None else UUID(running.id)
+            else:
                 claim = await self._repository.claim_idempotency(
                     session, "market-data:refresh", idempotency_key, request_hash, started_at
                 )
                 if claim.completed:
-                    run = await self._repository.refresh_run(session, claim.row.resource_id or "")
-                    if run is None:
+                    previous = await self._repository.refresh_run(session, claim.row.resource_id or "")
+                    inserted = await self._repository.refresh_run(session, run_id)
+                    if previous is None or inserted is None:
                         raise RuntimeError("refresh replay unavailable")
-                    return _refresh_result(run)
-                run_id = str(uuid4())
-                scope_hash = sha256(
-                    json.dumps(sorted(record.instrument.id for record in records), separators=(",", ":")).encode()
-                ).hexdigest()
-                session.add(
-                    QuoteRefreshRunRow(
-                        id=run_id,
-                        scope_hash=scope_hash,
-                        status="running",
-                        started_at=started_at,
-                        finished_at=None,
-                        updated_count=0,
-                        stale_count=0,
-                        unavailable_count=0,
-                    )
-                )
-            outcomes = await self._fetch_all(records)
-            status = _terminal_status(outcomes)
-            finished_at = self._aware_now()
-            items = [_item(outcome) for outcome in outcomes]
-            async with self._database.session() as session, session.begin():
-                await self._repository.complete_refresh(
-                    session, run_id=run_id, status=status, items=items, finished_at=finished_at, claim=claim
-                )
-                await self._repository.prune_expired(session, finished_at)
-            public_status: Literal["succeeded", "partial", "failed"] = "succeeded" if status == "completed" else status
-            return RefreshResult(
-                run_id=UUID(run_id),
-                status=public_status,
-                updated=sum(item.outcome == "updated" for item in outcomes),
-                stale=sum(item.outcome == "stale" for item in outcomes),
-                unavailable=sum(item.outcome == "unavailable" for item in outcomes),
+                    raced_replay = _refresh_result(previous)
+                    await session.delete(inserted)
+                else:
+                    await self._repository.link_refresh_idempotency(session, claim, run_id)
+        if raced_replay is not None:
+            return raced_replay
+        if conflict_id is not None:
+            raise RefreshInProgress(conflict_id)
+        if claim is None:
+            raise RefreshInProgress(await self._running_id())
+        admitted.append((run_id, owner_token))
+        outcomes = await self._fetch_all(records)
+        status = _terminal_status(outcomes)
+        finished_at = self._aware_now()
+        items = [_item(outcome) for outcome in outcomes]
+        async with self._database.session() as session, session.begin():
+            await self._repository.complete_refresh(
+                session,
+                run_id=run_id,
+                status=status,
+                items=items,
+                finished_at=finished_at,
+                claim=claim,
+                owner_token=owner_token,
             )
+            await self._repository.prune_expired(session, finished_at)
+        public_status: Literal["succeeded", "partial", "failed"] = "succeeded" if status == "completed" else status
+        return RefreshResult(
+            run_id=UUID(run_id),
+            status=public_status,
+            updated=sum(item.outcome == "updated" for item in outcomes),
+            stale=sum(item.outcome == "stale" for item in outcomes),
+            unavailable=sum(item.outcome == "unavailable" for item in outcomes),
+        )
 
     async def refresh_run(self, run_id: UUID) -> RefreshRunDetails:
         async with self._database.session() as session:
@@ -470,6 +520,27 @@ class MarketDataService:
             run = await self._repository.running_refresh(session)
             return None if run is None else UUID(run.id)
 
+    async def _terminalize(
+        self, run_id: str, owner_token: str, reason: str, finished_at: datetime
+    ) -> None:
+        async with self._database.session() as session, session.begin():
+            await self._repository.terminalize_refresh(
+                session,
+                run_id=run_id,
+                owner_token=owner_token,
+                reason=reason,
+                finished_at=finished_at,
+            )
+
+    async def _shield_terminalize(self, run_id: str, owner_token: str, reason: str) -> None:
+        cleanup = asyncio.create_task(self._terminalize(run_id, owner_token, reason, self._aware_now()))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
     async def _fetch_all(self, records: Sequence[RefreshInstrumentRecord]) -> list[_Outcome]:
         if not records:
             return []
@@ -483,13 +554,13 @@ class MarketDataService:
             for route, group in route_groups.items()
         ]
         try:
-            async with asyncio.timeout(self._settings.market_operation_timeout_seconds):
-                await asyncio.gather(*tasks)
-        except TimeoutError:
+            await asyncio.gather(*tasks)
+        except BaseException:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         return [
             results.get(record.instrument.id, _failed_outcome(record, None, ProviderErrorCode.TIMEOUT.value))
             for record in records

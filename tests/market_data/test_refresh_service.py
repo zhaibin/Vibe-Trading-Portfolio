@@ -10,12 +10,18 @@ from sqlalchemy import select
 
 from vibe_portfolio.config import Settings
 from vibe_portfolio.market_data.models import InstrumentCandidate, ProviderInstrument, ProviderQuote, RefreshScope
-from vibe_portfolio.market_data.service import MarketDataService, ProviderRegistry, RefreshInProgress
+from vibe_portfolio.market_data.service import (
+    MarketDataService,
+    ProviderRegistry,
+    RefreshInProgress,
+    RefreshOperationTimeout,
+)
 from vibe_portfolio.portfolio.database import Database
 from vibe_portfolio.portfolio.domain import AssetType, Currency, Market
-from vibe_portfolio.portfolio.repository import PortfolioRepository
+from vibe_portfolio.portfolio.repository import PortfolioRepository, hash_idempotency_key
 from vibe_portfolio.portfolio.tables import (
     AccountRow,
+    IdempotencyRow,
     InstrumentProviderSymbolRow,
     InstrumentRow,
     LatestQuoteRow,
@@ -283,7 +289,7 @@ async def test_total_operation_timeout_finishes_with_sanitized_unavailable_item(
     async with database.session() as session:
         item = await session.get(QuoteRefreshItemRow, (str(result.run_id), str(ids[0])))
     assert item is not None
-    assert (item.outcome, item.error_code) == ("unavailable", "PROVIDER_TIMEOUT")
+    assert (item.outcome, item.error_code) == ("unavailable", "REFRESH_TIMEOUT")
 
 
 class ConcurrencyTracker:
@@ -379,7 +385,238 @@ async def test_final_transaction_failure_rolls_back_quotes_and_startup_audit_fai
         running = await session.scalar(select(QuoteRefreshRunRow).where(QuoteRefreshRunRow.status == "running"))
     assert quote is not None and quote.price == Decimal("42.10") and quote.refresh_run_id == prior_run
     assert running is not None
-    await service.startup()
+    observer = MarketDataService(
+        database,
+        registry(),
+        now=lambda: NOW + timedelta(seconds=91),
+    )
+    await observer.startup()
     async with database.session() as session:
         audited = await session.get(QuoteRefreshRunRow, running.id)
     assert audited is not None and audited.status == "failed"
+
+
+class SlowSelectionRepository(PortfolioRepository):
+    async def active_refresh_instruments(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0.05)
+        return await super().active_refresh_instruments(*args, **kwargs)  # type: ignore[arg-type]
+
+
+class SlowFinalRepository(PortfolioRepository):
+    async def complete_refresh(self, *args: object, **kwargs: object) -> None:
+        await asyncio.sleep(0.05)
+        await super().complete_refresh(*args, **kwargs)  # type: ignore[arg-type]
+
+
+async def test_whole_operation_deadline_covers_selection_without_durable_residue(database: Database) -> None:
+    await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    service = MarketDataService(
+        database,
+        registry(),
+        repository=SlowSelectionRepository(),
+        settings=Settings(market_operation_timeout_seconds=0.01),
+        now=lambda: NOW,
+    )
+    with pytest.raises(RefreshOperationTimeout):
+        await service.refresh(RefreshScope.all(), "refresh-selection-timeout")
+    async with database.session() as session:
+        assert await session.scalar(select(QuoteRefreshRunRow)) is None
+        assert await session.scalar(select(IdempotencyRow)) is None
+
+
+async def test_whole_operation_deadline_terminalizes_an_admitted_final_write_timeout(
+    database: Database,
+) -> None:
+    ids = await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    service = MarketDataService(
+        database,
+        registry(),
+        repository=SlowFinalRepository(),
+        settings=Settings(market_operation_timeout_seconds=0.01),
+        now=lambda: NOW,
+    )
+    result = await service.refresh(RefreshScope.all(), "refresh-final-timeout")
+    assert result.status == "failed"
+    details = await service.refresh_run(result.run_id)
+    assert details.run.terminal_error == "REFRESH_TIMEOUT"
+    assert [(item.instrument_id, item.error_code) for item in details.items] == [
+        (str(ids[0]), "REFRESH_TIMEOUT")
+    ]
+    replay = await service.refresh(RefreshScope.all(), "refresh-final-timeout")
+    assert replay == result
+
+
+class AdmissionBarrier:
+    def __init__(self) -> None:
+        self.count = 0
+        self.ready = asyncio.Event()
+
+
+class BarrierRepository(PortfolioRepository):
+    def __init__(self, barrier: AdmissionBarrier) -> None:
+        self.barrier = barrier
+
+    async def active_refresh_instruments(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        records = await super().active_refresh_instruments(*args, **kwargs)  # type: ignore[arg-type]
+        self.barrier.count += 1
+        if self.barrier.count == 2:
+            self.barrier.ready.set()
+        await asyncio.wait_for(self.barrier.ready.wait(), timeout=1)
+        return records
+
+
+class ProviderCounter:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+
+class SharedBlockingProvider(FakeProvider):
+    def __init__(self, name: str, counter: ProviderCounter) -> None:
+        super().__init__(name)
+        self.counter = counter
+
+    async def fetch_quotes(self, instruments: Sequence[ProviderInstrument]) -> list[ProviderQuote]:
+        self.counter.calls += 1
+        self.counter.entered.set()
+        await self.counter.release.wait()
+        return await super().fetch_quotes(instruments)
+
+
+async def test_two_services_use_one_database_owned_run_and_loser_gets_in_progress(database: Database) -> None:
+    await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    second_database = Database(database.path)
+    await second_database.start()
+    barrier = AdmissionBarrier()
+    counter = ProviderCounter()
+    first = MarketDataService(
+        database,
+        registry(yahoo=SharedBlockingProvider("yahoo", counter)),
+        repository=BarrierRepository(barrier),
+        now=lambda: NOW,
+    )
+    second = MarketDataService(
+        second_database,
+        registry(yahoo=SharedBlockingProvider("yahoo", counter)),
+        repository=BarrierRepository(barrier),
+        now=lambda: NOW,
+    )
+    tasks = {
+        asyncio.create_task(first.refresh(RefreshScope.all(), "refresh-owner-a")),
+        asyncio.create_task(second.refresh(RefreshScope.all(), "refresh-owner-b")),
+    }
+    try:
+        await asyncio.wait_for(counter.entered.wait(), timeout=1)
+        done, pending = await asyncio.wait(tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+        assert len(done) == 1
+        loser = done.pop()
+        assert isinstance(loser.exception(), RefreshInProgress)
+        assert counter.calls == 1
+        counter.release.set()
+        winner = await asyncio.wait_for(pending.pop(), timeout=1)
+        assert winner.status == "succeeded"
+        async with database.session() as session:
+            runs = list(await session.scalars(select(QuoteRefreshRunRow)))
+        assert len(runs) == 1
+        assert runs[0].owner_token is None
+        assert runs[0].lease_expires_at is None
+    finally:
+        counter.release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await second_database.close()
+
+
+async def test_second_service_startup_does_not_abandon_a_live_lease(database: Database) -> None:
+    await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    yahoo = FakeProvider("yahoo")
+    yahoo.entered, yahoo.release = asyncio.Event(), asyncio.Event()
+    owner = MarketDataService(database, registry(yahoo=yahoo), now=lambda: NOW)
+    observer = MarketDataService(database, registry(), now=lambda: NOW)
+    active = asyncio.create_task(owner.refresh(RefreshScope.all(), "refresh-live-lease"))
+    await asyncio.wait_for(yahoo.entered.wait(), timeout=1)
+    await observer.startup()
+    async with database.session() as session:
+        run = await session.scalar(select(QuoteRefreshRunRow))
+    assert run is not None and run.status == "running"
+    assert run.lease_expires_at is not None and run.lease_expires_at > NOW
+    yahoo.release.set()
+    assert (await active).status == "succeeded"
+
+
+async def test_expired_lease_recovery_terminalizes_items_and_idempotency_for_exact_replay(
+    database: Database,
+) -> None:
+    ids = await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    run_id = str(uuid4())
+    request_hash = __import__("hashlib").sha256(b"null").hexdigest()
+    async with database.session() as session, session.begin():
+        session.add(
+            QuoteRefreshRunRow(
+                id=run_id,
+                scope_hash="2" * 64,
+                status="running",
+                started_at=NOW - timedelta(minutes=2),
+                finished_at=None,
+                updated_count=0,
+                stale_count=0,
+                unavailable_count=0,
+                owner_token=str(uuid4()),
+                lease_expires_at=NOW - timedelta(seconds=1),
+                scope_json=f'["{ids[0]}"]',
+                terminal_error=None,
+            )
+        )
+        session.add(
+            IdempotencyRow(
+                scope="market-data:refresh",
+                key_hash=hash_idempotency_key("refresh-crashed"),
+                request_hash=request_hash,
+                state="pending",
+                resource_id=run_id,
+                resource_version=None,
+                response_status=None,
+                created_at=NOW - timedelta(minutes=2),
+                expires_at=NOW + timedelta(hours=1),
+            )
+        )
+    service = MarketDataService(database, registry(), now=lambda: NOW)
+    await service.startup()
+    details = await service.refresh_run(UUID(run_id))
+    assert details.run.status == "failed"
+    assert details.run.terminal_error == "REFRESH_ABANDONED"
+    assert [(item.instrument_id, item.outcome, item.error_code) for item in details.items] == [
+        (str(ids[0]), "unavailable", "REFRESH_ABANDONED")
+    ]
+    replay = await service.refresh(RefreshScope.all(), "refresh-crashed")
+    assert replay.run_id == UUID(run_id)
+    assert replay.status == "failed"
+
+
+async def test_external_cancellation_terminalizes_run_items_and_idempotency_before_propagating(
+    database: Database,
+) -> None:
+    ids = await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    yahoo = FakeProvider("yahoo")
+    yahoo.entered, yahoo.release = asyncio.Event(), asyncio.Event()
+    service = MarketDataService(database, registry(yahoo=yahoo), now=lambda: NOW)
+    active = asyncio.create_task(service.refresh(RefreshScope.all(), "refresh-cancelled"))
+    await asyncio.wait_for(yahoo.entered.wait(), timeout=1)
+    active.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await active
+    async with database.session() as session:
+        run = await session.scalar(select(QuoteRefreshRunRow))
+        pending = await session.scalar(
+            select(IdempotencyRow).where(IdempotencyRow.state == "pending")
+        )
+    assert run is not None and run.status == "failed" and run.terminal_error == "REFRESH_CANCELLED"
+    assert run.finished_at == NOW
+    assert pending is None
+    details = await service.refresh_run(UUID(run.id))
+    assert [(item.instrument_id, item.error_code) for item in details.items] == [
+        (str(ids[0]), "REFRESH_CANCELLED")
+    ]
+    replay = await service.refresh(RefreshScope.all(), "refresh-cancelled")
+    assert replay.run_id == UUID(run.id) and replay.status == "failed"
+    assert yahoo.calls == [("DEMO.US",)]

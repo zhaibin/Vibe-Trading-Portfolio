@@ -139,6 +139,12 @@ class QuoteRefreshRunRow(Base):
         CheckConstraint("status IN ('running', 'completed', 'partial', 'failed')", name="ck_quote_refresh_runs_status"),
         CheckConstraint("finished_at IS NULL OR finished_at >= started_at", name="ck_quote_refresh_runs_finished_at"),
         Index("ix_quote_refresh_runs_finished_at", "finished_at"),
+        Index(
+            "uq_quote_refresh_runs_single_running",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -149,6 +155,10 @@ class QuoteRefreshRunRow(Base):
     updated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     stale_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     unavailable_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    owner_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UtcIsoDateTime(), nullable=True)
+    scope_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    terminal_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class LatestQuoteRow(Base):

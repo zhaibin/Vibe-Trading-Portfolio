@@ -167,6 +167,24 @@ async def test_yahoo_fetches_exact_decimal_currency_and_provider_timestamp() -> 
     assert parse_qs(requests[0].url.query.decode()) == {"interval": ["1m"], "range": ["1d"]}
 
 
+async def test_yahoo_mixed_batch_preserves_valid_quotes_when_one_instrument_fails() -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        value = payload if request.url.path.endswith("/DEMO") else {"chart": {"error": {"code": "bad"}}}
+        return httpx.Response(200, json=value, headers={"content-type": "application/json"})
+
+    instruments = [
+        ProviderInstrument("DEMO.US", "DEMO", Market.US, Currency.USD, AssetType.EQUITY),
+        ProviderInstrument("FAIL.US", "FAIL", Market.US, Currency.USD, AssetType.EQUITY),
+    ]
+    async with BoundedProviderHttp(
+        allowed_hosts={"query1.finance.yahoo.com"}, transport=httpx.MockTransport(handler)
+    ) as http:
+        quotes = await YahooSearchProvider(http).fetch_quotes(instruments)
+    assert [quote.canonical_symbol for quote in quotes] == ["DEMO.US"]
+
+
 async def test_yahoo_quote_rejects_currency_mismatch() -> None:
     payload = json.loads(QUOTE_FIXTURE.read_text())
     payload["chart"]["result"][0]["meta"]["currency"] = "HKD"

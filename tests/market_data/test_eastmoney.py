@@ -186,6 +186,24 @@ async def test_eastmoney_fetches_exact_decimal_and_provider_timestamp() -> None:
     }
 
 
+async def test_eastmoney_mixed_batch_preserves_valid_quotes_when_one_instrument_fails() -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        value = payload if request.url.params["secid"] == "1.600000" else {"data": {}}
+        return httpx.Response(200, json=value, headers={"content-type": "application/json"})
+
+    instruments = [
+        ProviderInstrument("600000.SH", "1.600000", Market.CN_SH, Currency.CNY, AssetType.EQUITY),
+        ProviderInstrument("600001.SH", "1.600001", Market.CN_SH, Currency.CNY, AssetType.EQUITY),
+    ]
+    async with BoundedProviderHttp(
+        allowed_hosts={"push2.eastmoney.com"}, transport=httpx.MockTransport(handler)
+    ) as http:
+        quotes = await EastmoneySearchProvider(http).fetch_quotes(instruments)
+    assert [quote.canonical_symbol for quote in quotes] == ["600000.SH"]
+
+
 @pytest.mark.parametrize("data", [None, {}, {"f43": "NaN", "f57": "600000", "f58": "Demo", "f59": 2, "f86": 1}])
 async def test_eastmoney_quote_rejects_malformed_payloads(data: object) -> None:
     transport = httpx.MockTransport(

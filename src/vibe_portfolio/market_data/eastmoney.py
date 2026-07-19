@@ -166,17 +166,23 @@ class EastmoneySearchProvider:
 
     async def fetch_quotes(self, instruments: Sequence[ProviderInstrument]) -> list[ProviderQuote]:
         quotes: list[ProviderQuote] = []
+        failures: list[ProviderFailure] = []
         for instrument in instruments:
-            parameters = urlencode({"secid": instrument.provider_symbol, "fields": _QUOTE_FIELDS})
-            payload = await self._http.get_json(f"{_QUOTE_ENDPOINT}?{parameters}")
-            if type(payload) is not dict:
-                _invalid_quote()
-            data = payload.get("data")
-            if data is None:
-                continue
-            if type(data) is not dict:
-                _invalid_quote()
-            quotes.append(_quote(data, instrument))
+            try:
+                parameters = urlencode({"secid": instrument.provider_symbol, "fields": _QUOTE_FIELDS})
+                payload = await self._http.get_json(f"{_QUOTE_ENDPOINT}?{parameters}")
+                if type(payload) is not dict:
+                    _invalid_quote()
+                data = payload.get("data")
+                if data is None:
+                    continue
+                if type(data) is not dict:
+                    _invalid_quote()
+                quotes.append(_quote(data, instrument))
+            except ProviderFailure as error:
+                failures.append(error)
+        if not quotes and failures:
+            raise failures[0]
         return quotes
 
 

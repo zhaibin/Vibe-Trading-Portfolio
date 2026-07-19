@@ -142,15 +142,23 @@ class YahooSearchProvider:
 
     async def fetch_quotes(self, instruments: Sequence[ProviderInstrument]) -> list[ProviderQuote]:
         quotes: list[ProviderQuote] = []
+        failures: list[ProviderFailure] = []
         for instrument in instruments:
-            provider_symbol = instrument.provider_symbol
-            if re.fullmatch(r"[A-Z0-9.^=-]{1,20}", provider_symbol) is None:
-                _invalid_quote()
-            parameters = urlencode({"interval": "1m", "range": "1d"})
-            payload = await self._http.get_json(f"{_QUOTE_ENDPOINT}/{quote(provider_symbol, safe='.-^=')}?{parameters}")
-            quote_value = _chart_quote(payload, instrument)
-            if quote_value is not None:
-                quotes.append(quote_value)
+            try:
+                provider_symbol = instrument.provider_symbol
+                if re.fullmatch(r"[A-Z0-9.^=-]{1,20}", provider_symbol) is None:
+                    _invalid_quote()
+                parameters = urlencode({"interval": "1m", "range": "1d"})
+                payload = await self._http.get_json(
+                    f"{_QUOTE_ENDPOINT}/{quote(provider_symbol, safe='.-^=')}?{parameters}"
+                )
+                quote_value = _chart_quote(payload, instrument)
+                if quote_value is not None:
+                    quotes.append(quote_value)
+            except ProviderFailure as error:
+                failures.append(error)
+        if not quotes and failures:
+            raise failures[0]
         return quotes
 
 

@@ -1,7 +1,8 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vibe_portfolio.portfolio.database import Database
 from vibe_portfolio.portfolio.router import build_portfolio_router
 from vibe_portfolio.portfolio.service import PortfolioService
-from vibe_portfolio.portfolio.tables import InstrumentRow, PositionRow
+from vibe_portfolio.portfolio.tables import InstrumentCandidateRow, InstrumentRow, PositionRow
 
 
 def write_headers(key: str) -> dict[str, str]:
@@ -60,6 +61,32 @@ async def test_create_account_returns_exact_decimal_strings_and_unknown_cash(cli
     assert isinstance(known["cash_balance"], str)
     assert unknown_response.status_code == 201
     assert unknown_response.json()["cash_balance"] is None
+
+
+async def test_successful_account_write_prunes_expired_rows(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    now = datetime.now(UTC)
+    expired_id = str(uuid4())
+    async with database.session() as session, session.begin():
+        session.add(
+            InstrumentCandidateRow(
+                id=expired_id,
+                canonical_symbol="OLD.US",
+                name="Old",
+                market="US",
+                currency="USD",
+                asset_type="equity",
+                provider="yahoo",
+                provider_symbols_json='[{"provider":"yahoo","symbol":"OLD"}]',
+                created_at=now - timedelta(minutes=20),
+                expires_at=now - timedelta(minutes=5),
+                consumed_at=None,
+            )
+        )
+    await create_account(client, name="Prune account")
+    async with database.session() as session:
+        assert await session.get(InstrumentCandidateRow, expired_id) is None
 
 
 async def test_create_rejects_normalized_duplicate_active_name(client: httpx.AsyncClient) -> None:

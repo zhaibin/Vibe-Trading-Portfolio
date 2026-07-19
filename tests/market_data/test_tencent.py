@@ -36,6 +36,22 @@ async def test_tencent_decodes_gb18030_price_and_converts_shanghai_timestamp_to_
     assert requests[0].url == "https://qt.gtimg.cn/q=sh600000"
 
 
+async def test_tencent_mixed_batch_preserves_valid_quotes_when_one_instrument_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        content = FIXTURE.read_bytes() if request.url.path.endswith("q=sh600000") else b"malformed"
+        return httpx.Response(200, content=content, headers={"content-type": "text/plain"})
+
+    instruments = [
+        ProviderInstrument("600000.SH", "sh600000", Market.CN_SH, Currency.CNY, AssetType.EQUITY),
+        ProviderInstrument("600001.SH", "sh600001", Market.CN_SH, Currency.CNY, AssetType.EQUITY),
+    ]
+    async with BoundedProviderHttp(
+        allowed_hosts={"qt.gtimg.cn"}, transport=httpx.MockTransport(handler)
+    ) as http:
+        quotes = await TencentQuoteProvider(http).fetch_quotes(instruments)
+    assert [quote.canonical_symbol for quote in quotes] == ["600000.SH"]
+
+
 async def test_tencent_rejects_wrong_response_identity() -> None:
     payload = FIXTURE.read_text().replace("v_sh600000=", "v_sz000001=").encode("gb18030")
     transport = httpx.MockTransport(lambda _: httpx.Response(200, content=payload))

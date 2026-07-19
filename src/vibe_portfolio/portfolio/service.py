@@ -453,6 +453,7 @@ class PortfolioService:
                 resource_version=1,
                 status=201,
             )
+            await self.repository.prune_expired(session, now)
             return PortfolioResponse(201, instrument_response(instrument))
 
     async def create_position(self, command: PositionCreate, key: str) -> PortfolioResponse:
@@ -496,6 +497,7 @@ class PortfolioService:
             response = account_response(account)
             await self.repository.record_account_version(session, account)
             await self.repository.complete_idempotency(session, claim, account, expected_status)
+            await self.repository.prune_expired(session, now)
             return PortfolioResponse(expected_status, response)
 
     async def list_accounts(self, cursor: str | None, limit: int) -> tuple[list[AccountRow], str | None]:
@@ -552,6 +554,7 @@ class PortfolioService:
                 resource_version=position.version,
                 status=expected_status,
             )
+            await self.repository.prune_expired(session, now)
             return PortfolioResponse(expected_status, response)
 
     async def list_positions(

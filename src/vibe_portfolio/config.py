@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import AnyHttpUrl, Field, SecretStr
+from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     market_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=10)
     market_read_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
     market_operation_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
+    market_refresh_lease_seconds: float = Field(default=90.0, gt=0, le=300)
     market_max_concurrency: int = Field(default=4, ge=1, le=8)
     market_max_batch_instruments: int = Field(default=500, ge=1, le=1_000)
     market_max_response_bytes: int = Field(default=1_000_000, ge=1024, le=5_000_000)
@@ -38,6 +39,12 @@ class Settings(BaseSettings):
     mcp_host: Literal["127.0.0.1"] = "127.0.0.1"
     mcp_port: int = Field(default=8766, ge=1024, le=65535)
     mcp_token_file: Path = Path("var/secrets/mcp-token")
+
+    @model_validator(mode="after")
+    def validate_market_refresh_lease(self) -> Self:
+        if self.market_refresh_lease_seconds <= self.market_operation_timeout_seconds + 5:
+            raise ValueError("market refresh lease must exceed the operation deadline by more than five seconds")
+        return self
 
     def api_origin(self) -> str:
         """Return the loopback API origin."""

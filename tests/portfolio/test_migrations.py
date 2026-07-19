@@ -48,7 +48,7 @@ def test_initial_migration_has_revision_and_material_schema_behavior(tmp_path: P
     _upgrade_database(path)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0004",)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0005",)
         foreign_keys = connection.execute("PRAGMA foreign_key_list(positions)").fetchall()
         assert {foreign_key[2] for foreign_key in foreign_keys} == {"accounts", "instruments"}
         indexes = connection.execute("PRAGMA index_list(positions)").fetchall()
@@ -161,10 +161,66 @@ def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Pat
     runtime_script = ScriptDirectory.from_config(runtime_config)
     assert root_script.dir == runtime_script.dir
     revision = next(runtime_script.walk_revisions())
-    assert revision.revision == "20260719_0004"
+    assert revision.revision == "20260719_0005"
     assert revision.path is not None
     migration_source = Path(revision.path).read_text()
-    assert "position_versions" in migration_source
+    assert "uq_quote_refresh_runs_single_running" in migration_source
+
+
+def test_refresh_lease_migration_backfills_running_rows_and_enforces_single_owner(tmp_path: Path) -> None:
+    path = tmp_path / "portfolio.db"
+    _upgrade_database(path, "20260719_0004")
+    with closing(sqlite3.connect(path)) as connection:
+        for index in range(2):
+            connection.execute(
+                "insert into quote_refresh_runs (id, scope_hash, status, started_at) values (?, ?, ?, ?)",
+                (f"run-{index}", str(index) * 64, "running", "2026-07-19T00:00:00+00:00"),
+            )
+        connection.commit()
+
+    _upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        columns = {row[1] for row in connection.execute("pragma table_info(quote_refresh_runs)")}
+        statuses = connection.execute(
+            "select status, terminal_error from quote_refresh_runs order by id"
+        ).fetchall()
+        index = next(
+            row for row in connection.execute("pragma index_list(quote_refresh_runs)")
+            if row[1] == "uq_quote_refresh_runs_single_running"
+        )
+        assert {"owner_token", "lease_expires_at", "scope_json", "terminal_error"} <= columns
+        assert statuses == [("failed", "REFRESH_ABANDONED"), ("failed", "REFRESH_ABANDONED")]
+        assert index[2] == 1
+        connection.execute(
+            "insert into quote_refresh_runs "
+            "(id, scope_hash, status, started_at, owner_token, lease_expires_at, scope_json) "
+            "values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "new-running",
+                "a" * 64,
+                "running",
+                "2026-07-19T01:00:00+00:00",
+                "owner-a",
+                "2026-07-19T01:02:00+00:00",
+                "[]",
+            ),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "insert into quote_refresh_runs "
+                "(id, scope_hash, status, started_at, owner_token, lease_expires_at, scope_json) "
+                "values (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "duplicate-running",
+                    "b" * 64,
+                    "running",
+                    "2026-07-19T01:00:00+00:00",
+                    "owner-b",
+                    "2026-07-19T01:02:00+00:00",
+                    "[]",
+                ),
+            )
 
 
 def test_privacy_migration_moves_valid_replay_state_to_history_and_drops_response_json(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -116,6 +117,35 @@ async def test_search_keeps_partial_provider_success_and_empty_success(database:
 
     empty = MarketDataService(database, (FakeProvider("eastmoney"), FakeProvider("yahoo")))
     assert await empty.search("missing", 5) == []
+
+
+async def test_successful_candidate_cache_prunes_expired_rows(database: Database) -> None:
+    now = datetime(2026, 7, 19, 3, 4, tzinfo=UTC)
+    expired_id = str(uuid4())
+    async with database.session() as session, session.begin():
+        session.add(
+            InstrumentCandidateRow(
+                id=expired_id,
+                canonical_symbol="OLD.US",
+                name="Old",
+                market="US",
+                currency="USD",
+                asset_type="equity",
+                provider="yahoo",
+                provider_symbols_json='[{"provider":"yahoo","symbol":"OLD"}]',
+                created_at=now - timedelta(minutes=20),
+                expires_at=now - timedelta(minutes=5),
+                consumed_at=None,
+            )
+        )
+    service = MarketDataService(
+        database,
+        (FakeProvider("eastmoney"), FakeProvider("yahoo", [candidate("DEMO.US", "yahoo")])),
+        now=lambda: now,
+    )
+    await service.search("demo", 5)
+    async with database.session() as session:
+        assert await session.get(InstrumentCandidateRow, expired_id) is None
 
 
 async def test_search_raises_only_when_all_providers_fail(database: Database) -> None:

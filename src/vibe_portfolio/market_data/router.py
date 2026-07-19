@@ -58,6 +58,7 @@ def _refresh_view(details: RefreshRunDetails) -> RefreshRunView:
         updated=run.updated_count,
         stale=run.stale_count,
         unavailable=run.unavailable_count,
+        terminal_error=run.terminal_error,
         providers_used=tuple(sorted({item.provider for item in details.items if item.provider is not None})),
         started_at=run.started_at,
         finished_at=run.finished_at,

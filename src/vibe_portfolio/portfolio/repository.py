@@ -9,7 +9,7 @@ from hashlib import sha256
 from typing import Final, Protocol
 from uuid import uuid4
 
-from sqlalchemy import Select, delete, exists, select, update
+from sqlalchemy import Select, delete, exists, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -313,6 +313,56 @@ class PortfolioRepository:
         )
         return run
 
+    async def create_refresh_run(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        scope_hash: str,
+        scope_json: str,
+        owner_token: str,
+        started_at: datetime,
+        lease_expires_at: datetime,
+    ) -> bool:
+        inserted = await session.scalar(
+            sqlite_insert(QuoteRefreshRunRow)
+            .values(
+                id=run_id,
+                scope_hash=scope_hash,
+                status="running",
+                started_at=started_at,
+                finished_at=None,
+                updated_count=0,
+                stale_count=0,
+                unavailable_count=0,
+                owner_token=owner_token,
+                lease_expires_at=lease_expires_at,
+                scope_json=scope_json,
+                terminal_error=None,
+            )
+            .on_conflict_do_nothing()
+            .returning(QuoteRefreshRunRow.id)
+        )
+        return inserted is not None
+
+    async def link_refresh_idempotency(
+        self, session: AsyncSession, claim: IdempotencyClaim, run_id: str
+    ) -> None:
+        linked = await session.scalar(
+            update(IdempotencyRow)
+            .where(
+                IdempotencyRow.scope == claim.row.scope,
+                IdempotencyRow.key_hash == claim.row.key_hash,
+                IdempotencyRow.request_hash == claim.row.request_hash,
+                IdempotencyRow.state == "pending",
+            )
+            .values(resource_id=run_id)
+            .returning(IdempotencyRow.scope)
+        )
+        if linked is None:
+            raise ReplayUnavailable()
+        claim.row.resource_id = run_id
+
     async def refresh_run(self, session: AsyncSession, run_id: str) -> QuoteRefreshRunRow | None:
         return await session.get(QuoteRefreshRunRow, run_id)
 
@@ -327,22 +377,98 @@ class PortfolioRepository:
             ).all()
         )
 
-    async def abandon_running_refreshes(self, session: AsyncSession, now: datetime) -> None:
-        run_ids = list(
-            await session.scalars(select(QuoteRefreshRunRow.id).where(QuoteRefreshRunRow.status == "running"))
+    async def recover_expired_refreshes(self, session: AsyncSession, now: datetime) -> None:
+        runs = list(
+            await session.scalars(
+                select(QuoteRefreshRunRow).where(
+                    QuoteRefreshRunRow.status == "running",
+                    or_(
+                        QuoteRefreshRunRow.lease_expires_at.is_(None),
+                        QuoteRefreshRunRow.lease_expires_at <= now,
+                    ),
+                )
+            )
         )
-        if not run_ids:
-            return
-        await session.execute(
+        for run in runs:
+            await self.terminalize_refresh(
+                session,
+                run_id=run.id,
+                owner_token=run.owner_token,
+                reason="REFRESH_ABANDONED",
+                finished_at=now,
+            )
+
+    async def terminalize_refresh(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        owner_token: str | None,
+        reason: str,
+        finished_at: datetime,
+    ) -> bool:
+        run = await session.get(QuoteRefreshRunRow, run_id, populate_existing=True)
+        if run is None or run.status != "running" or run.owner_token != owner_token:
+            return False
+        try:
+            decoded = json.loads(run.scope_json or "[]")
+            instrument_ids = (
+                decoded
+                if isinstance(decoded, list) and all(isinstance(value, str) for value in decoded)
+                else []
+            )
+        except (TypeError, ValueError):
+            instrument_ids = []
+        quoted = set(
+            await session.scalars(
+                select(LatestQuoteRow.instrument_id).where(LatestQuoteRow.instrument_id.in_(instrument_ids))
+            )
+        )
+        stale = 0
+        unavailable = 0
+        for instrument_id in instrument_ids:
+            outcome = "stale" if instrument_id in quoted else "unavailable"
+            stale += outcome == "stale"
+            unavailable += outcome == "unavailable"
+            await session.execute(
+                sqlite_insert(QuoteRefreshItemRow)
+                .values(
+                    run_id=run_id,
+                    instrument_id=instrument_id,
+                    outcome=outcome,
+                    provider=None,
+                    error_code=reason,
+                    created_at=finished_at,
+                )
+                .on_conflict_do_nothing()
+            )
+        terminal = await session.scalar(
             update(QuoteRefreshRunRow)
-            .where(QuoteRefreshRunRow.id.in_(run_ids), QuoteRefreshRunRow.status == "running")
-            .values(status="failed", finished_at=now)
+            .where(
+                QuoteRefreshRunRow.id == run_id,
+                QuoteRefreshRunRow.status == "running",
+                QuoteRefreshRunRow.owner_token == owner_token,
+            )
+            .values(
+                status="failed",
+                finished_at=finished_at,
+                updated_count=0,
+                stale_count=stale,
+                unavailable_count=unavailable,
+                owner_token=None,
+                lease_expires_at=None,
+                terminal_error=reason,
+            )
+            .returning(QuoteRefreshRunRow.id)
         )
+        if terminal is None:
+            return False
         await session.execute(
-            update(QuoteRefreshItemRow)
-            .where(QuoteRefreshItemRow.run_id.in_(run_ids))
-            .values(error_code="REFRESH_ABANDONED")
+            update(IdempotencyRow)
+            .where(IdempotencyRow.resource_id == run_id, IdempotencyRow.state == "pending")
+            .values(state="completed", resource_version=1, response_status=502)
         )
+        return True
 
     async def complete_refresh(
         self,
@@ -353,6 +479,7 @@ class PortfolioRepository:
         items: Sequence[RefreshItemInput],
         finished_at: datetime,
         claim: IdempotencyClaim,
+        owner_token: str,
     ) -> None:
         counts = {"updated": 0, "stale": 0, "unavailable": 0}
         for item in items:
@@ -396,13 +523,20 @@ class PortfolioRepository:
                 )
         completed = await session.scalar(
             update(QuoteRefreshRunRow)
-            .where(QuoteRefreshRunRow.id == run_id, QuoteRefreshRunRow.status == "running")
+            .where(
+                QuoteRefreshRunRow.id == run_id,
+                QuoteRefreshRunRow.status == "running",
+                QuoteRefreshRunRow.owner_token == owner_token,
+            )
             .values(
                 status=status,
                 finished_at=finished_at,
                 updated_count=counts["updated"],
                 stale_count=counts["stale"],
                 unavailable_count=counts["unavailable"],
+                owner_token=None,
+                lease_expires_at=None,
+                terminal_error=None if status != "failed" else "QUOTE_UNAVAILABLE",
             )
             .returning(QuoteRefreshRunRow.id)
         )

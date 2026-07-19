@@ -361,7 +361,7 @@ async def test_database_urls_address_exact_special_character_path(tmp_path: Path
         assert path.exists()
         async with database.session() as session:
             assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                    "20260719_0004"
+                    "20260719_0005"
             )
     finally:
         await database.close()
@@ -411,7 +411,7 @@ async def test_database_creates_owner_only_parent_and_schema(tmp_path: Path) -> 
         assert path.stat().st_mode & 0o777 == 0o600
         async with database.session() as session:
             revision = await session.execute(text("SELECT version_num FROM alembic_version"))
-            assert revision.scalar_one() == "20260719_0004"
+            assert revision.scalar_one() == "20260719_0005"
     finally:
         await database.close()
 

@@ -38,13 +38,21 @@ class TencentQuoteProvider:
 
     async def fetch_quotes(self, instruments: Sequence[ProviderInstrument]) -> list[ProviderQuote]:
         quotes: list[ProviderQuote] = []
+        failures: list[ProviderFailure] = []
         for instrument in instruments:
-            if not _valid_instrument(instrument):
-                _invalid_quote()
-            payload = await self._http.get_text(f"{_QUOTE_ENDPOINT}{instrument.provider_symbol}", encoding="gb18030")
-            quote = _parse_quote(payload, instrument)
-            if quote is not None:
-                quotes.append(quote)
+            try:
+                if not _valid_instrument(instrument):
+                    _invalid_quote()
+                payload = await self._http.get_text(
+                    f"{_QUOTE_ENDPOINT}{instrument.provider_symbol}", encoding="gb18030"
+                )
+                quote = _parse_quote(payload, instrument)
+                if quote is not None:
+                    quotes.append(quote)
+            except ProviderFailure as error:
+                failures.append(error)
+        if not quotes and failures:
+            raise failures[0]
         return quotes
 
 

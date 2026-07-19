@@ -6,6 +6,13 @@ from pydantic import ValidationError
 from vibe_portfolio.config import Settings
 
 
+def test_market_refresh_lease_must_safely_exceed_whole_operation_deadline() -> None:
+    with pytest.raises(ValidationError):
+        Settings(market_operation_timeout_seconds=15, market_refresh_lease_seconds=20)
+    settings = Settings(market_operation_timeout_seconds=15, market_refresh_lease_seconds=30)
+    assert settings.market_refresh_lease_seconds == 30
+
+
 def test_settings_use_loopback_defaults_and_hide_secrets() -> None:
     settings = Settings(vibe_api_key="vibe-secret")
 
@@ -41,6 +48,7 @@ def test_portfolio_runtime_defaults_are_local_and_bounded() -> None:
     assert settings.market_connect_timeout_seconds == 3.0
     assert settings.market_read_timeout_seconds == 8.0
     assert settings.market_operation_timeout_seconds == 15.0
+    assert settings.market_refresh_lease_seconds == 90.0
     assert settings.market_max_concurrency == 4
     assert settings.market_max_batch_instruments == 500
     assert settings.market_max_response_bytes == 1_000_000

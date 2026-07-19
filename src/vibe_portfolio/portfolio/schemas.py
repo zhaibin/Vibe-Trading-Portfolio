@@ -117,6 +117,7 @@ class RefreshRunView(BaseModel):
     updated: int
     stale: int
     unavailable: int
+    terminal_error: str | None
     providers_used: tuple[str, ...]
     started_at: datetime
     finished_at: datetime | None
