@@ -1,0 +1,150 @@
+diff --git a/node_modules/openapi-typescript/dist/lib/ts.mjs b/node_modules/openapi-typescript/dist/lib/ts.mjs
+index 8fa9e94..3a48245 100644
+--- a/node_modules/openapi-typescript/dist/lib/ts.mjs
++++ b/node_modules/openapi-typescript/dist/lib/ts.mjs
+@@ -1,5 +1,5 @@
+ import { parseRef } from '@redocly/openapi-core/lib/ref-utils.js';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ 
+ const JS_PROPERTY_INDEX_RE = /^[A-Za-z_$][A-Za-z_$0-9]*$/;
+ const JS_ENUM_INVALID_CHARS_RE = /[^A-Za-z_$0-9]+(.)?/g;
+diff --git a/node_modules/openapi-typescript/dist/lib/utils.mjs b/node_modules/openapi-typescript/dist/lib/utils.mjs
+index c44709d..5e8c9cc 100644
+--- a/node_modules/openapi-typescript/dist/lib/utils.mjs
++++ b/node_modules/openapi-typescript/dist/lib/utils.mjs
+@@ -2,7 +2,7 @@ import { parseRef, escapePointer } from '@redocly/openapi-core/lib/ref-utils.js'
+ import c from 'ansi-colors';
+ export { default as c } from 'ansi-colors';
+ import supportsColor from 'supports-color';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex, tsLiteral } from './ts.mjs';
+ 
+ if (!supportsColor.stdout || supportsColor.stdout.hasBasic === false) {
+diff --git a/node_modules/openapi-typescript/dist/transform/components-object.mjs b/node_modules/openapi-typescript/dist/transform/components-object.mjs
+index da850f3..0d84184 100644
+--- a/node_modules/openapi-typescript/dist/transform/components-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/components-object.mjs
+@@ -1,6 +1,6 @@
+ import { performance } from 'node:perf_hooks';
+ import * as changeCase from 'change-case';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex, QUESTION_TOKEN, addJSDocComment, NEVER } from '../lib/ts.mjs';
+ import { getEntries, createRef, debug } from '../lib/utils.mjs';
+ import transformHeaderObject from './header-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/header-object.mjs b/node_modules/openapi-typescript/dist/transform/header-object.mjs
+index cfd4204..4506fd2 100644
+--- a/node_modules/openapi-typescript/dist/transform/header-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/header-object.mjs
+@@ -1,5 +1,5 @@
+ import { escapePointer } from '@redocly/openapi-core/lib/ref-utils.js';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex, addJSDocComment, UNKNOWN } from '../lib/ts.mjs';
+ import { getEntries } from '../lib/utils.mjs';
+ import transformMediaTypeObject from './media-type-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/index.mjs b/node_modules/openapi-typescript/dist/transform/index.mjs
+index e08b18f..a9eda9d 100644
+--- a/node_modules/openapi-typescript/dist/transform/index.mjs
++++ b/node_modules/openapi-typescript/dist/transform/index.mjs
+@@ -1,5 +1,5 @@
+ import { performance } from 'node:perf_hooks';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { stringToAST, tsModifiers, tsRecord, NEVER, STRING } from '../lib/ts.mjs';
+ import { debug, createRef } from '../lib/utils.mjs';
+ import transformComponentsObject from './components-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/operation-object.mjs b/node_modules/openapi-typescript/dist/transform/operation-object.mjs
+index b141847..d9495f8 100644
+--- a/node_modules/openapi-typescript/dist/transform/operation-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/operation-object.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { oapiRef, tsModifiers, tsPropertyIndex, QUESTION_TOKEN, addJSDocComment, NEVER } from '../lib/ts.mjs';
+ import { createRef } from '../lib/utils.mjs';
+ import { transformParametersArray } from './parameters-array.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/parameters-array.mjs b/node_modules/openapi-typescript/dist/transform/parameters-array.mjs
+index dc20775..28dd533 100644
+--- a/node_modules/openapi-typescript/dist/transform/parameters-array.mjs
++++ b/node_modules/openapi-typescript/dist/transform/parameters-array.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { oapiRef, tsModifiers, tsPropertyIndex, addJSDocComment, QUESTION_TOKEN, NEVER } from '../lib/ts.mjs';
+ import { createRef } from '../lib/utils.mjs';
+ import transformParameterObject from './parameter-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/path-item-object.mjs b/node_modules/openapi-typescript/dist/transform/path-item-object.mjs
+index 1c449b5..446a993 100644
+--- a/node_modules/openapi-typescript/dist/transform/path-item-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/path-item-object.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex, QUESTION_TOKEN, NEVER, oapiRef, addJSDocComment } from '../lib/ts.mjs';
+ import { createRef } from '../lib/utils.mjs';
+ import transformOperationObject, { injectOperationObject } from './operation-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/paths-object.mjs b/node_modules/openapi-typescript/dist/transform/paths-object.mjs
+index 5e898c3..a577f74 100644
+--- a/node_modules/openapi-typescript/dist/transform/paths-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/paths-object.mjs
+@@ -1,5 +1,5 @@
+ import { performance } from 'node:perf_hooks';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex, oapiRef, addJSDocComment, stringToAST } from '../lib/ts.mjs';
+ import { getEntries, createRef, debug } from '../lib/utils.mjs';
+ import transformPathItemObject from './path-item-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/request-body-object.mjs b/node_modules/openapi-typescript/dist/transform/request-body-object.mjs
+index 0f6583f..4c786cf 100644
+--- a/node_modules/openapi-typescript/dist/transform/request-body-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/request-body-object.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex, addJSDocComment, QUESTION_TOKEN, NEVER } from '../lib/ts.mjs';
+ import { getEntries, createRef } from '../lib/utils.mjs';
+ import transformMediaTypeObject from './media-type-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/response-object.mjs b/node_modules/openapi-typescript/dist/transform/response-object.mjs
+index 000851a..e54f69c 100644
+--- a/node_modules/openapi-typescript/dist/transform/response-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/response-object.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { QUESTION_TOKEN, oapiRef, tsModifiers, tsPropertyIndex, addJSDocComment, STRING, UNKNOWN, NEVER } from '../lib/ts.mjs';
+ import { getEntries, createRef } from '../lib/utils.mjs';
+ import transformHeaderObject from './header-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/responses-object.mjs b/node_modules/openapi-typescript/dist/transform/responses-object.mjs
+index dafb268..fff6e00 100644
+--- a/node_modules/openapi-typescript/dist/transform/responses-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/responses-object.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { oapiRef, tsModifiers, tsPropertyIndex, addJSDocComment, NEVER } from '../lib/ts.mjs';
+ import { getEntries, createRef } from '../lib/utils.mjs';
+ import transformResponseObject from './response-object.mjs';
+diff --git a/node_modules/openapi-typescript/dist/transform/schema-object.mjs b/node_modules/openapi-typescript/dist/transform/schema-object.mjs
+index dc20a5c..e5afd77 100644
+--- a/node_modules/openapi-typescript/dist/transform/schema-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/schema-object.mjs
+@@ -1,5 +1,5 @@
+ import { parseRef } from '@redocly/openapi-core/lib/ref-utils.js';
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { NEVER, UNKNOWN, oapiRef, tsLiteral, tsEnum, tsUnion, NULL, tsArrayLiteralExpression, tsIntersection, tsIsPrimitive, tsRecord, STRING, tsNullable, UNDEFINED, NUMBER, BOOLEAN, QUESTION_TOKEN, tsModifiers, tsPropertyIndex, addJSDocComment, tsWithRequired, tsOmit } from '../lib/ts.mjs';
+ import { createRef, createDiscriminatorProperty, getEntries } from '../lib/utils.mjs';
+ 
+diff --git a/node_modules/openapi-typescript/dist/transform/webhooks-object.mjs b/node_modules/openapi-typescript/dist/transform/webhooks-object.mjs
+index f48a576..ccd4c61 100644
+--- a/node_modules/openapi-typescript/dist/transform/webhooks-object.mjs
++++ b/node_modules/openapi-typescript/dist/transform/webhooks-object.mjs
+@@ -1,4 +1,4 @@
+-import ts from 'typescript';
++import ts from 'typescript-openapi';
+ import { tsModifiers, tsPropertyIndex } from '../lib/ts.mjs';
+ import { getEntries, createRef } from '../lib/utils.mjs';
+ import transformPathItemObject from './path-item-object.mjs';

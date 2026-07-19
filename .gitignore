@@ -13,3 +13,8 @@ htmlcov/
 dist/
 build/
 var/
+frontend/node_modules/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+src/vibe_portfolio/web/dist/

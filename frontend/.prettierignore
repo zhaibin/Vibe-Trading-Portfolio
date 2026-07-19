@@ -1,0 +1,5 @@
+coverage/
+node_modules/
+openapi.json
+patches/
+src/api/schema.d.ts
