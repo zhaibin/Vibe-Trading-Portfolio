@@ -15,7 +15,7 @@ The following state was verified after local stabilization testing on 2026-07-19
 - Target/integration branch: `main`
 - Last verified active branch: `main`
 - Local stabilization integration: `main` fast-forwarded from `3f3e081` to `96aeb56` after the merged-result gate passed
-- Last verified integrated head before remote publication: `6b1ee52` (`Merge remote-tracking branch 'origin/main'`)
+- Last verified published head before this handoff update: `6ecf516` (`docs: record remote history reconciliation`)
 - Live stabilization commits: `c15c12f` (`fix: poll for runtime terminal proof`), `7a26e3a` (`fix: validate goal-aware MCP probe events`), and `ef6938c` (`fix: retry runtime cancel registration race`)
 - Live stabilization design/plan commits: `e1316f7`, `1d207b9`, and `3f3e081`
 - Integrated handoff branch: `docs/new-session-handoff`
@@ -24,8 +24,9 @@ The following state was verified after local stabilization testing on 2026-07-19
 - Milestone 0 implementation head: `3b8e502` (`fix: reject pre-open token path replacement`)
 - Handoff design commit: `9d4dfd5` (`docs: design new-session handoff`)
 - Plan commit: `fb1e81e` (`docs: plan new-session handoff`)
-- Remote: `origin` is `https://github.com/zhaibin/Vibe-Trading-Portfolio.git`; `git ls-remote --symref origin HEAD` reported remote `main` at `cab3ffbcb7365bd788876943638538895a7899fa` on 2026-07-19
+- Remote: `origin` is `git@github.com:zhaibin/Vibe-Trading-Portfolio.git`; local `main` tracks `origin/main`
 - Remote reconciliation: the unrelated `origin/main` initial history was preserved by merging `cab3ffb` (`Initial commit`) as the second parent of `6b1ee52`; its `LICENSE` is now tracked locally. No force-push was used.
+- Remote publication: HTTPS push was rejected because the OAuth token lacked GitHub's `workflow` scope; the already-authenticated SSH transport then advanced remote `main` normally from `cab3ffb` to `6ecf516` without widening token permissions.
 - Upstream Vibe baseline: `0.1.11` at `67a393e4574865e8ab9b1b3f9a9fd1d7ab337343`
 - Supported Vibe range: `>=0.1.11,<0.2.0`
 
@@ -113,11 +114,11 @@ The route-only, live runtime, and full MCP commands are intentionally documented
 
 ## Current blockers
 
-Current code/test blockers: none known. Local branch integration and remote-history reconciliation are complete. Future holdings-domain work still requires a separately approved design.
+Current code/test blockers: none known. Local branch integration, remote-history reconciliation, and normal remote publication are complete. Future holdings-domain work still requires a separately approved design.
 
 ## Recommended next step
 
-After confirming normal remote publication, propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. That design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe.
+Propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. That design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe.
 
 ## End-of-session update checklist
 
