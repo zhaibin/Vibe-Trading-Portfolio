@@ -9,12 +9,15 @@ description = "Personal portfolio sidecar for Vibe-Trading"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "aiosqlite>=0.21,<1",
+  "alembic>=1.16,<2",
   "fastapi>=0.115,<1",
   "fastmcp>=2.14,<3",
   "httpx>=0.28,<1",
   "packaging>=24,<27",
   "pydantic>=2.10,<3",
   "pydantic-settings>=2.7,<3",
+  "sqlalchemy>=2.0.41,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
 
