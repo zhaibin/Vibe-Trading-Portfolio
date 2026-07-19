@@ -5,6 +5,8 @@ import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+SQLITE_FOREIGN_KEYS_PRAGMA = "PRAGMA foreign_keys=ON"
+
 
 @pytest_asyncio.fixture
 async def async_engine() -> AsyncIterator[AsyncEngine]:
@@ -15,7 +17,7 @@ async def async_engine() -> AsyncIterator[AsyncEngine]:
     def enable_foreign_keys(dbapi_connection: Any, _: object) -> None:
         cursor = dbapi_connection.cursor()
         try:
-            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute(SQLITE_FOREIGN_KEYS_PRAGMA)
         finally:
             cursor.close()
 
