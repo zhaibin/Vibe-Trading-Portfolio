@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Generic, TypeAlias, TypeVar
 
-from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, WithJsonSchema
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, WithJsonSchema
 
 from vibe_portfolio.portfolio.domain import Currency, DomainValidationError, parse_money, parse_price, parse_quantity
 
@@ -48,12 +48,14 @@ DecimalOutput = Annotated[
 
 
 class AccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=80)
     currency: Currency
     cash_balance: MoneyInput | None = None
 
 
 class AccountPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     version: int = Field(ge=0)
     name: str | None = Field(default=None, min_length=1, max_length=80)
     cash_balance: MoneyInput | None = None

@@ -183,5 +183,6 @@ class IdempotencyRow(Base):
     state: Mapped[str] = mapped_column(String(9), nullable=False)
     resource_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcIsoDateTime(), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UtcIsoDateTime(), nullable=False)

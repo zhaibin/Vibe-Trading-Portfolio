@@ -361,7 +361,7 @@ async def test_database_urls_address_exact_special_character_path(tmp_path: Path
         assert path.exists()
         async with database.session() as session:
             assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
-                "20260719_0001"
+                    "20260719_0002"
             )
     finally:
         await database.close()
@@ -391,9 +391,12 @@ def test_upgrade_restores_original_when_final_permission_enforcement_fails(
     assert path_mode_calls == 2
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT id FROM legacy_records").fetchone() == (1,)
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
+            ).fetchone()
+            is None
+        )
 
 
 @pytest.mark.asyncio
@@ -408,7 +411,7 @@ async def test_database_creates_owner_only_parent_and_schema(tmp_path: Path) -> 
         assert path.stat().st_mode & 0o777 == 0o600
         async with database.session() as session:
             revision = await session.execute(text("SELECT version_num FROM alembic_version"))
-            assert revision.scalar_one() == "20260719_0001"
+            assert revision.scalar_one() == "20260719_0002"
     finally:
         await database.close()
 
@@ -435,9 +438,7 @@ async def test_database_rejects_broken_symlink(tmp_path: Path) -> None:
         await Database(path).start()
 
 
-def test_upgrade_maps_lstat_permission_failure_to_path_unsafe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_upgrade_maps_lstat_permission_failure_to_path_unsafe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "portfolio.db"
     real_lstat = os.lstat
 
@@ -558,11 +559,13 @@ async def test_database_connections_enforce_pragmas_and_bounded_busy_failure(tmp
         )
         with pytest.raises(DatabaseBusyError, match="DATABASE_BUSY") as raised:
             async with database.session() as session:
-                await session.execute(text(
-                    "INSERT INTO accounts VALUES "
-                    "('account-2', 'Other', 'other', 'USD', NULL, 1, '2026-07-19T00:00:00+00:00', "
-                    "'2026-07-19T00:00:00+00:00', NULL)"
-                ))
+                await session.execute(
+                    text(
+                        "INSERT INTO accounts VALUES "
+                        "('account-2', 'Other', 'other', 'USD', NULL, 1, '2026-07-19T00:00:00+00:00', "
+                        "'2026-07-19T00:00:00+00:00', NULL)"
+                    )
+                )
                 await session.commit()
         assert raised.value.code == "DATABASE_BUSY"
     finally:

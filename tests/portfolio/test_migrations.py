@@ -40,7 +40,7 @@ def test_initial_migration_has_revision_and_material_schema_behavior(tmp_path: P
     _upgrade_database(path)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0001",)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0002",)
         foreign_keys = connection.execute("PRAGMA foreign_key_list(positions)").fetchall()
         assert {foreign_key[2] for foreign_key in foreign_keys} == {"accounts", "instruments"}
         indexes = connection.execute("PRAGMA index_list(positions)").fetchall()
@@ -153,9 +153,9 @@ def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Pat
     runtime_script = ScriptDirectory.from_config(runtime_config)
     assert root_script.dir == runtime_script.dir
     revision = next(runtime_script.walk_revisions())
-    assert revision.revision == "20260719_0001"
+    assert revision.revision == "20260719_0002"
     assert revision.path is not None
-    assert "op.create_table" in Path(revision.path).read_text()
+    assert "op.add_column" in Path(revision.path).read_text()
 
 
 def test_packaged_migration_tree_is_the_only_authoring_environment() -> None:

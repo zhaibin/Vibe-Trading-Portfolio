@@ -1,5 +1,6 @@
 """Transactional persistence operations for portfolio resources."""
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -7,6 +8,7 @@ from typing import Final
 from uuid import uuid4
 
 from sqlalchemy import Select, exists, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vibe_portfolio.portfolio.schemas import AccountCreate, AccountPatch
@@ -68,11 +70,14 @@ class PortfolioRepository:
         key_hash = hash_idempotency_key(key)
         row = await session.get(IdempotencyRow, (scope, key_hash))
         if row is not None:
+            if row.expires_at <= now:
+                row.request_hash, row.state = request_hash, "pending"
+                row.resource_id = row.response_status = row.response_json = None
+                row.created_at, row.expires_at = now, now + IDEMPOTENCY_TTL
+                await session.flush()
+                return IdempotencyClaim(row=row, completed=False)
             if row.request_hash != request_hash:
                 raise IdempotencyConflict()
-            if row.expires_at <= now:
-                await session.delete(row)
-                await session.flush()
             else:
                 return IdempotencyClaim(row=row, completed=row.state == "completed")
         row = IdempotencyRow(
@@ -82,19 +87,41 @@ class PortfolioRepository:
             state="pending",
             resource_id=None,
             response_status=None,
+            response_json=None,
             created_at=now,
             expires_at=now + IDEMPOTENCY_TTL,
         )
-        session.add(row)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError as error:
+            row = await session.get(IdempotencyRow, (scope, key_hash))
+            if row is None:
+                raise
+            if row.expires_at <= now:
+                row.request_hash, row.state = request_hash, "pending"
+                row.resource_id = row.response_status = row.response_json = None
+                row.created_at, row.expires_at = now, now + IDEMPOTENCY_TTL
+                await session.flush()
+                return IdempotencyClaim(row=row, completed=False)
+            if row.request_hash != request_hash:
+                raise IdempotencyConflict() from error
+            return IdempotencyClaim(row=row, completed=row.state == "completed")
         return IdempotencyClaim(row=row, completed=False)
 
     async def complete_idempotency(
-        self, session: AsyncSession, claim: IdempotencyClaim, account: AccountRow, status: int
+        self,
+        session: AsyncSession,
+        claim: IdempotencyClaim,
+        account: AccountRow,
+        status: int,
+        response: dict[str, object],
     ) -> None:
         claim.row.state = "completed"
         claim.row.resource_id = account.id
         claim.row.response_status = status
+        claim.row.response_json = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         await session.flush()
 
     async def account(self, session: AsyncSession, account_id: str) -> AccountRow | None:
@@ -157,6 +184,17 @@ class PortfolioRepository:
                 raise AccountHasActivePositions()
             archived_at = now
         elif command.archived is False:
+            duplicate = await session.scalar(
+                select(
+                    exists().where(
+                        AccountRow.id != account_id,
+                        AccountRow.normalized_name == current.normalized_name,
+                        AccountRow.archived_at.is_(None),
+                    )
+                )
+            )
+            if duplicate:
+                raise DuplicateAccountName()
             archived_at = None
         values: dict[str, object] = {"updated_at": now, "version": command.version + 1, "archived_at": archived_at}
         if command.name is not None:
@@ -165,12 +203,18 @@ class PortfolioRepository:
             values["normalized_name"] = normalized_name
         if "cash_balance" in command.model_fields_set:
             values["cash_balance"] = command.cash_balance
-        result = await session.execute(
-            update(AccountRow)
-            .where(AccountRow.id == account_id, AccountRow.version == command.version)
-            .values(**values)
-            .returning(AccountRow.id)
-        )
+        try:
+            async with session.begin_nested():
+                result = await session.execute(
+                    update(AccountRow)
+                    .where(AccountRow.id == account_id, AccountRow.version == command.version)
+                    .values(**values)
+                    .returning(AccountRow.id)
+                )
+        except IntegrityError as error:
+            if "normalized_name" in str(error):
+                raise DuplicateAccountName() from error
+            raise
         if result.scalar_one_or_none() is None:
             latest = await self.account(session, account_id)
             raise ConcurrentModification(None if latest is None else latest.version)

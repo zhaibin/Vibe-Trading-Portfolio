@@ -36,9 +36,7 @@ def test_canonical_symbol(code: str, market: Market, expected: str) -> None:
         ("aapl", "US", "AAPL.US"),
     ],
 )
-def test_canonical_symbol_coerces_supported_raw_market_values(
-    code: str, market: str, expected: str
-) -> None:
+def test_canonical_symbol_coerces_supported_raw_market_values(code: str, market: str, expected: str) -> None:
     assert canonical_symbol(code, market) == expected
 
 

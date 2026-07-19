@@ -190,9 +190,7 @@ def _configuration(path: Path, busy_timeout_ms: int, migrations_directory: Path 
     config = Config()
     config.set_main_option("script_location", str(migrations_directory or _migrations_directory()))
     sqlalchemy_url = _sync_sqlite_url(path)
-    config.set_main_option(
-        "sqlalchemy.url", sqlalchemy_url.render_as_string(hide_password=False).replace("%", "%%")
-    )
+    config.set_main_option("sqlalchemy.url", sqlalchemy_url.render_as_string(hide_password=False).replace("%", "%%"))
     config.attributes["portfolio_sqlalchemy_url"] = sqlalchemy_url
     config.attributes["portfolio_busy_timeout_ms"] = busy_timeout_ms
     return config

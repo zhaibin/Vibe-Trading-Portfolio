@@ -74,6 +74,30 @@ async def test_create_rejects_normalized_duplicate_active_name(client: httpx.Asy
     assert response.json()["error"]["code"] == "DUPLICATE_ACCOUNT_NAME"
 
 
+async def test_restore_archived_account_rejects_new_active_normalized_duplicate(client: httpx.AsyncClient) -> None:
+    archived = await create_account(client, name="可恢复名称")
+    archived_response = await client.patch(
+        f"/api/v1/accounts/{archived['id']}",
+        json={"version": 1, "archived": True},
+        headers=write_headers("archive-for-restore-conflict"),
+    )
+    active_response = await client.post(
+        "/api/v1/accounts",
+        json={"name": "可恢复名称", "currency": "CNY", "cash_balance": "0"},
+        headers=write_headers("active-name-for-restore-conflict"),
+    )
+    restored = await client.patch(
+        f"/api/v1/accounts/{archived['id']}",
+        json={"version": 2, "archived": False},
+        headers=write_headers("restore-name-conflict"),
+    )
+
+    assert archived_response.status_code == 200
+    assert active_response.status_code == 201
+    assert restored.status_code == 409
+    assert restored.json()["error"]["code"] == "DUPLICATE_ACCOUNT_NAME"
+
+
 async def test_patch_rejects_stale_version(client: httpx.AsyncClient) -> None:
     account = await create_account(client)
     response = await client.patch(
@@ -141,6 +165,67 @@ async def test_list_accounts_is_cursor_paginated(client: httpx.AsyncClient) -> N
     assert second.status_code == 200
     assert len(second.json()["items"]) == 1
     assert second.json()["items"][0]["id"] != first.json()["items"][0]["id"]
+
+
+async def test_invalid_request_validation_uses_sanitized_stable_envelope(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/api/v1/accounts",
+        json={"name": "测试", "currency": "CNY", "cash_balance": 12.34},
+        headers=write_headers("numeric-money-rejected"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert "12.34" not in response.text
+    assert response.json()["error"]["fields"] == {"body.cash_balance": "invalid"}
+
+
+async def test_unknown_currency_patch_field_is_rejected_without_mutation(client: httpx.AsyncClient) -> None:
+    account = await create_account(client)
+    response = await client.patch(
+        f"/api/v1/accounts/{account['id']}",
+        json={"version": 1, "currency": "USD"},
+        headers=write_headers("currency-change-rejected"),
+    )
+    current = await client.get("/api/v1/accounts")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert current.json()["items"][0]["currency"] == "CNY"
+    assert current.json()["items"][0]["version"] == 1
+
+
+async def test_patch_preserves_omitted_cash_and_clears_explicit_null(client: httpx.AsyncClient) -> None:
+    account = await create_account(client)
+    omitted = await client.patch(
+        f"/api/v1/accounts/{account['id']}",
+        json={"version": 1, "name": "改名"},
+        headers=write_headers("cash-omitted-patch"),
+    )
+    cleared = await client.patch(
+        f"/api/v1/accounts/{account['id']}",
+        json={"version": 2, "cash_balance": None},
+        headers=write_headers("cash-cleared-patch"),
+    )
+
+    assert omitted.status_code == 200
+    assert omitted.json()["cash_balance"] == "12.340000"
+    assert cleared.status_code == 200
+    assert cleared.json()["cash_balance"] is None
+
+
+async def test_malformed_cursor_and_path_use_sanitized_validation_error(client: httpx.AsyncClient) -> None:
+    cursor = await client.get("/api/v1/accounts?cursor=not-a-uuid")
+    path = await client.patch(
+        "/api/v1/accounts/not-a-uuid",
+        json={"version": 1},
+        headers=write_headers("invalid-path-account"),
+    )
+
+    for response in (cursor, path):
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+        assert "not-a-uuid" not in response.text
 
 
 async def test_database_failure_is_sanitized(
