@@ -146,6 +146,7 @@ def calculate_summary(
                 and candidate_quote.price > 0
                 and _aware(candidate_quote.as_of)
                 and _aware(candidate_quote.fetched_at)
+                and candidate_quote.as_of <= now
             )
             if not valid_quote:
                 unvalued_count += 1
@@ -160,7 +161,6 @@ def calculate_summary(
                 latest_attempt is not None
                 and latest_attempt.outcome == "updated"
                 and latest_attempt.run_id == candidate_quote.refresh_run_id
-                and candidate_quote.as_of <= now
             )
             state = quote_state(candidate_quote.as_of, latest_attempt_succeeded=attempt_succeeded, now=now)
             value = position.quantity * candidate_quote.price

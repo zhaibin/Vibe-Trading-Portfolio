@@ -183,6 +183,83 @@ def test_summary_includes_stale_value_and_marks_total_estimated(quote_age: timed
     assert summary.positions[0].quote_state is QuoteState.STALE
 
 
+@pytest.mark.parametrize(
+    ("age", "expected_state", "estimated"),
+    [
+        (timedelta(hours=72), QuoteState.FRESH, False),
+        (timedelta(hours=72, microseconds=1), QuoteState.STALE, True),
+    ],
+)
+def test_summary_observes_the_exact_72_hour_freshness_boundary(
+    age: timedelta,
+    expected_state: QuoteState,
+    estimated: bool,
+) -> None:
+    account_row = account("account-cny")
+    position_row = position("position-cny", account_row.id, "instrument-cny", quantity="1", average_cost="5")
+    quote_row = quote(position_row.instrument_id, price="10", run_id="run-boundary", age=age)
+
+    summary = calculate_summary(
+        currency=Currency.CNY,
+        accounts=[account_row],
+        positions=[position_row],
+        quotes={position_row.instrument_id: quote_row},
+        latest_attempts={position_row.instrument_id: attempt(position_row.instrument_id, run_id="run-boundary")},
+        now=FIXED_NOW,
+    )
+
+    assert summary.positions[0].quote_state is expected_state
+    assert summary.estimated is estimated
+
+
+def test_summary_fails_closed_on_a_future_quote() -> None:
+    account_row = account("account-cny")
+    position_row = position("position-cny", account_row.id, "instrument-cny", quantity="2", average_cost="3")
+    quote_row = quote(
+        position_row.instrument_id,
+        price="10",
+        run_id="run-future",
+        age=-timedelta(microseconds=1),
+    )
+
+    summary = calculate_summary(
+        currency=Currency.CNY,
+        accounts=[account_row],
+        positions=[position_row],
+        quotes={position_row.instrument_id: quote_row},
+        latest_attempts={position_row.instrument_id: attempt(position_row.instrument_id, run_id="run-future")},
+        now=FIXED_NOW,
+    )
+
+    assert summary.market_value == Decimal("0")
+    assert summary.unvalued_cost == Decimal("6")
+    assert summary.unvalued_count == 1
+    assert summary.estimated is True
+    assert summary.positions[0].quote_state is QuoteState.UNAVAILABLE
+
+
+@pytest.mark.parametrize("field", ["as_of", "fetched_at"])
+def test_summary_fails_closed_on_a_naive_quote_timestamp(field: str) -> None:
+    account_row = account("account-cny")
+    position_row = position("position-cny", account_row.id, "instrument-cny", quantity="2", average_cost="3")
+    quote_row = quote(position_row.instrument_id, price="10", run_id="run-naive")
+    setattr(quote_row, field, FIXED_NOW.replace(tzinfo=None))
+
+    summary = calculate_summary(
+        currency=Currency.CNY,
+        accounts=[account_row],
+        positions=[position_row],
+        quotes={position_row.instrument_id: quote_row},
+        latest_attempts={position_row.instrument_id: attempt(position_row.instrument_id, run_id="run-naive")},
+        now=FIXED_NOW,
+    )
+
+    assert summary.market_value == Decimal("0")
+    assert summary.unvalued_count == 1
+    assert summary.estimated is True
+    assert summary.positions[0].quote_state is QuoteState.UNAVAILABLE
+
+
 def test_summary_allocation_excludes_unavailable_positions() -> None:
     account_row = account("account-cny")
     positions = [
@@ -211,6 +288,36 @@ def test_summary_allocation_excludes_unavailable_positions() -> None:
     assert summary.market_value == Decimal("400")
     assert [item.allocation for item in summary.positions] == [Decimal("0.25"), Decimal("0.75"), None]
     assert summary.unvalued_cost == Decimal("80")
+
+
+def test_summary_pnl_uses_only_valued_cost_when_unavailable_positions_coexist() -> None:
+    account_row = account("account-cny")
+    valued = position("position-valued", account_row.id, "instrument-valued", quantity="2", average_cost="10")
+    unavailable = position(
+        "position-unavailable",
+        account_row.id,
+        "instrument-unavailable",
+        quantity="5",
+        average_cost="100",
+    )
+    quote_row = quote(valued.instrument_id, price="15", run_id="run-valued")
+
+    summary = calculate_summary(
+        currency=Currency.CNY,
+        accounts=[account_row],
+        positions=[valued, unavailable],
+        quotes={valued.instrument_id: quote_row},
+        latest_attempts={valued.instrument_id: attempt(valued.instrument_id, run_id="run-valued")},
+        now=FIXED_NOW,
+    )
+
+    assert summary.market_value == Decimal("30")
+    assert summary.position_cost == Decimal("520")
+    assert summary.valued_position_cost == Decimal("20")
+    assert summary.unvalued_cost == Decimal("500")
+    assert summary.unrealized_pnl == Decimal("10")
+    assert summary.unrealized_pnl_pct == Decimal("0.5")
+    assert summary.unvalued_count == 1
 
 
 def test_summary_excludes_archived_rows_and_keeps_currencies_independent() -> None:

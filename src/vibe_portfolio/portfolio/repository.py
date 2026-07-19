@@ -24,6 +24,7 @@ from vibe_portfolio.portfolio.tables import (
     PositionRow,
     PositionVersionRow,
     QuoteRefreshItemRow,
+    QuoteRefreshRunRow,
 )
 
 IDEMPOTENCY_TTL: Final = timedelta(hours=24)
@@ -682,8 +683,17 @@ class PortfolioRepository:
         attempts = (
             await session.scalars(
                 select(QuoteRefreshItemRow)
-                .where(QuoteRefreshItemRow.instrument_id.in_(instrument_ids))
-                .order_by(QuoteRefreshItemRow.created_at.desc(), QuoteRefreshItemRow.run_id.desc())
+                .join(QuoteRefreshRunRow, QuoteRefreshRunRow.id == QuoteRefreshItemRow.run_id)
+                .where(
+                    QuoteRefreshItemRow.instrument_id.in_(instrument_ids),
+                    QuoteRefreshRunRow.status.in_(("completed", "partial", "failed")),
+                    QuoteRefreshRunRow.finished_at.is_not(None),
+                )
+                .order_by(
+                    QuoteRefreshItemRow.created_at.desc(),
+                    QuoteRefreshRunRow.finished_at.desc(),
+                    QuoteRefreshItemRow.run_id.desc(),
+                )
             )
         ).all()
         latest_attempts: dict[str, QuoteRefreshItemRow] = {}
