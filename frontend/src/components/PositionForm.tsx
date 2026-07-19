@@ -234,6 +234,8 @@ export function PositionForm({
   const [quantityError, setQuantityError] = useState<string>();
   const [costError, setCostError] = useState<string>();
   const [noteError, setNoteError] = useState<string>();
+  const [currentSearchRequestId, setCurrentSearchRequestId] = useState(0);
+  const [confirmationRequestId, setConfirmationRequestId] = useState<number>();
   const confirmPending = useRef<PendingSubmission | undefined>(undefined);
   const positionPending = useRef<PendingSubmission | undefined>(undefined);
   const searchController = useRef<AbortController | undefined>(undefined);
@@ -296,6 +298,11 @@ export function PositionForm({
     onError: (_error, request) => {
       if (request.requestId !== searchRequestId.current) return;
       onNotice({ kind: "error", title: "无法确认证券，请重新搜索" });
+    },
+    onSettled: (_data, _error, request) => {
+      setConfirmationRequestId((current) =>
+        current === request.requestId ? undefined : current,
+      );
     },
   });
 
@@ -372,6 +379,7 @@ export function PositionForm({
       const requestId = searchRequestId.current + 1;
       searchController.current = controller;
       searchRequestId.current = requestId;
+      setCurrentSearchRequestId(requestId);
       confirmPending.current = undefined;
       setCandidates([]);
       setConfirmed(undefined);
@@ -471,13 +479,14 @@ export function PositionForm({
               <p>来源：{candidate.sources.join("、")}</p>
               <button
                 type="button"
-                disabled={confirmation.isPending}
+                disabled={confirmationRequestId === currentSearchRequestId}
                 onClick={() => {
                   const payload = { candidate_id: candidate.candidate_id };
+                  setConfirmationRequestId(currentSearchRequestId);
                   confirmation.mutate({
                     candidateId: candidate.candidate_id,
                     key: retainedKey(confirmPending, payload),
-                    requestId: searchRequestId.current,
+                    requestId: currentSearchRequestId,
                   });
                 }}
               >

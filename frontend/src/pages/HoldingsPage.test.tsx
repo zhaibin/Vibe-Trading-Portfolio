@@ -22,6 +22,7 @@ interface ApiFixtureOptions {
   accountPatchFailures?: number;
   accountErrorCode?: string;
   accountPatchErrorCode?: string;
+  accountPatchErrorFields?: Record<string, string | number>;
   accounts?: AccountFixture[];
   accountListHandler?: (archived: boolean) => Promise<Response>;
   candidateCurrency?: "CNY" | "HKD" | "USD";
@@ -268,7 +269,15 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
         return json({ error: { code: "NOT_FOUND" } }, 404);
       }
       if (options.accountPatchErrorCode !== undefined) {
-        return json({ error: { code: options.accountPatchErrorCode } }, 409);
+        return json(
+          {
+            error: {
+              code: options.accountPatchErrorCode,
+              fields: options.accountPatchErrorFields,
+            },
+          },
+          409,
+        );
       }
       if (accountPatchFailures > 0) {
         accountPatchFailures -= 1;
@@ -749,6 +758,54 @@ describe("HoldingsPage trusted position flow", () => {
     ).toBeVisible();
   });
 
+  it("allows the current candidate to be confirmed while an obsolete confirmation never settles", async () => {
+    const obsoleteConfirmation = deferred<Response>();
+    createApiFixture({
+      accounts: [usdAccount],
+      searchHandler: async (query) =>
+        query === "旧"
+          ? candidateResponse("旧证券", "OLD.US", "old-candidate")
+          : candidateResponse("新证券", "NEW.US", "new-candidate"),
+      confirmationHandler: (candidateId) =>
+        candidateId === "old-candidate"
+          ? obsoleteConfirmation.promise
+          : Promise.resolve(
+              json(
+                {
+                  id: "00000000-0000-4000-8000-000000000200",
+                  canonical_symbol: "NEW.US",
+                  name: "新证券",
+                  market: "US",
+                  currency: "USD",
+                  asset_type: "equity",
+                  created_at: "2026-07-20T00:00:00Z",
+                  updated_at: "2026-07-20T00:00:00Z",
+                },
+                201,
+              ),
+            ),
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+
+    await user.type(screen.getByLabelText("证券代码或名称"), "旧");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    await user.click(
+      await screen.findByRole("button", { name: "确认 旧证券 OLD.US" }),
+    );
+    await user.clear(screen.getByLabelText("证券代码或名称"));
+    await user.type(screen.getByLabelText("证券代码或名称"), "新");
+    await user.click(screen.getByRole("button", { name: /搜索/ }));
+
+    const currentConfirm = await screen.findByRole("button", {
+      name: "确认 新证券 NEW.US",
+    });
+    expect(currentConfirm).toBeEnabled();
+    await user.click(currentConfirm);
+    expect(await screen.findByText(/已确认：新证券 NEW.US/)).toBeVisible();
+  });
+
   it("clears a prior search error after a successful new search", async () => {
     let attempts = 0;
     createApiFixture({
@@ -1060,6 +1117,214 @@ describe("HoldingsPage edit and archive flow", () => {
       { version: 1, archived: true },
       { version: 2, archived: false },
     ]);
+  });
+
+  it("shows the authoritative version and reload action when account restore conflicts", async () => {
+    const archivedAccount = {
+      ...usdAccount,
+      version: 4,
+      archived_at: "2026-07-20T01:00:00Z",
+    };
+    const { fetchMock } = createApiFixture({
+      accounts: [archivedAccount],
+      accountPatchErrorCode: "CONCURRENT_MODIFICATION",
+      accountPatchErrorFields: { version: 7 },
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+    await user.click(
+      await screen.findByRole("button", { name: "恢复账户 示例美元账户" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("记录已在其他位置更新");
+    expect(alert).toHaveTextContent("服务器当前版本 7");
+    const beforeReload = fetchMock.mock.calls.filter(([input]) =>
+      String(input).startsWith("/api/v1/accounts?archived="),
+    ).length;
+    await user.click(within(alert).getByRole("button", { name: "重新载入" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          String(input).startsWith("/api/v1/accounts?archived="),
+        ).length,
+      ).toBeGreaterThan(beforeReload),
+    );
+  });
+
+  it("waits for both account refetches when archive completes archived-first", async () => {
+    const activeRefetch = deferred<Response>();
+    const archivedRefetch = deferred<Response>();
+    let activeReads = 0;
+    let archivedReads = 0;
+    createApiFixture({
+      accounts: [usdAccount],
+      accountListHandler: (archived) => {
+        if (archived) {
+          archivedReads += 1;
+          return archivedReads === 1
+            ? Promise.resolve(json({ items: [], next_cursor: null }))
+            : archivedRefetch.promise;
+        }
+        activeReads += 1;
+        return activeReads === 1
+          ? Promise.resolve(json({ items: [usdAccount], next_cursor: null }))
+          : activeRefetch.promise;
+      },
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+    const archive = screen.getByRole("button", {
+      name: "归档账户 示例美元账户",
+    });
+    await waitFor(() => expect(archive).toBeEnabled());
+    await user.click(archive);
+    await user.click(
+      within(screen.getByRole("region", { name: "确认归档账户" })).getByRole(
+        "button",
+        { name: "确认归档" },
+      ),
+    );
+    await waitFor(() => {
+      expect(activeReads).toBe(2);
+      expect(archivedReads).toBe(2);
+    });
+
+    archivedRefetch.resolve(
+      json({
+        items: [
+          {
+            ...usdAccount,
+            version: 2,
+            archived_at: "2026-07-20T01:00:00Z",
+          },
+        ],
+        next_cursor: null,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText("示例美元账户")).toBeNull());
+    expect(screen.queryByText(/所属账户不可用/)).not.toBeInTheDocument();
+
+    activeRefetch.resolve(json({ items: [], next_cursor: null }));
+    expect(
+      await screen.findByRole("button", { name: "恢复账户 示例美元账户" }),
+    ).toBeVisible();
+    expect(screen.getAllByText("示例美元账户")).toHaveLength(1);
+  });
+
+  it("fails closed on stale active account data when its archive refetch fails", async () => {
+    let activeReads = 0;
+    let archivedReads = 0;
+    createApiFixture({
+      accounts: [usdAccount],
+      accountListHandler: (archived) => {
+        if (archived) {
+          archivedReads += 1;
+          return Promise.resolve(
+            json({
+              items:
+                archivedReads === 1
+                  ? []
+                  : [
+                      {
+                        ...usdAccount,
+                        version: 2,
+                        archived_at: "2026-07-20T01:00:00Z",
+                      },
+                    ],
+              next_cursor: null,
+            }),
+          );
+        }
+        activeReads += 1;
+        return Promise.resolve(
+          activeReads === 1
+            ? json({ items: [usdAccount], next_cursor: null })
+            : json({ error: { code: "DATABASE_BUSY" } }, 503),
+        );
+      },
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+    const archive = screen.getByRole("button", {
+      name: "归档账户 示例美元账户",
+    });
+    await waitFor(() => expect(archive).toBeEnabled());
+    await user.click(archive);
+    await user.click(
+      within(screen.getByRole("region", { name: "确认归档账户" })).getByRole(
+        "button",
+        { name: "确认归档" },
+      ),
+    );
+
+    expect(await screen.findByText("暂时无法加载账户，请重试")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "编辑账户 示例美元账户" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "恢复账户 示例美元账户" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "重新载入账户" })).toBeVisible();
+  });
+
+  it("waits for both account refetches when restore completes active-first", async () => {
+    const archivedAccount = {
+      ...usdAccount,
+      version: 2,
+      archived_at: "2026-07-20T01:00:00Z",
+    };
+    const activeRefetch = deferred<Response>();
+    const archivedRefetch = deferred<Response>();
+    let activeReads = 0;
+    let archivedReads = 0;
+    createApiFixture({
+      accounts: [archivedAccount],
+      accountListHandler: (archived) => {
+        if (archived) {
+          archivedReads += 1;
+          return archivedReads === 1
+            ? Promise.resolve(
+                json({ items: [archivedAccount], next_cursor: null }),
+              )
+            : archivedRefetch.promise;
+        }
+        activeReads += 1;
+        return activeReads === 1
+          ? Promise.resolve(json({ items: [], next_cursor: null }))
+          : activeRefetch.promise;
+      },
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+    await user.click(
+      await screen.findByRole("button", { name: "恢复账户 示例美元账户" }),
+    );
+    await waitFor(() => {
+      expect(activeReads).toBe(2);
+      expect(archivedReads).toBe(2);
+    });
+
+    activeRefetch.resolve(
+      json({
+        items: [{ ...usdAccount, version: 3, archived_at: null }],
+        next_cursor: null,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText("示例美元账户")).toBeNull());
+    expect(screen.queryByText(/所属账户不可用/)).not.toBeInTheDocument();
+
+    archivedRefetch.resolve(json({ items: [], next_cursor: null }));
+    expect(
+      await screen.findByRole("button", { name: "编辑账户 示例美元账户" }),
+    ).toBeVisible();
+    expect(screen.getAllByText("示例美元账户")).toHaveLength(1);
   });
 
   it("disables account archive while an active position exists", async () => {

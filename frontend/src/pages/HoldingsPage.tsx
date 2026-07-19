@@ -220,9 +220,14 @@ function ArchivedAccountRecord({
         error instanceof ApiError &&
         error.code === "CONCURRENT_MODIFICATION"
       ) {
+        const version = error.fields?.version;
         onNotice({
           kind: "error",
           title: "记录已在其他位置更新",
+          detail:
+            typeof version === "number" || typeof version === "string"
+              ? `服务器当前版本 ${String(version)}`
+              : "请重新载入服务器中的最新记录。",
           action: {
             label: "重新载入",
             onClick: () => {
@@ -485,9 +490,21 @@ export function HoldingsPage() {
     ...positionsQuery(true),
     enabled: showArchived,
   });
-  const accountItems = accounts.data?.items ?? [];
-  const archivedAccountItems = archivedAccounts.data?.items ?? [];
+  const accountItems = (
+    accounts.isError ? [] : (accounts.data?.items ?? [])
+  ).filter((account) => account.archived_at === null);
+  const activeAccountIds = new Set(accountItems.map((account) => account.id));
+  const archivedAccountItems = (
+    archivedAccounts.isError ? [] : (archivedAccounts.data?.items ?? [])
+  ).filter(
+    (account) =>
+      account.archived_at !== null && !activeAccountIds.has(account.id),
+  );
   const allAccountItems = [...accountItems, ...archivedAccountItems];
+  const accountQueriesFetching =
+    accounts.isFetching || (showArchived && archivedAccounts.isFetching);
+  const archivedDataFetching =
+    accountQueriesFetching || archivedPositions.isFetching;
   const currentPositionRecords = (positions.data?.items ?? []).flatMap(
     (position) => {
       const account = accountItems.find(
@@ -513,7 +530,16 @@ export function HoldingsPage() {
       {accounts.isPending ? <p role="status">正在加载账户…</p> : null}
       {accounts.isError ? (
         <StatusMessage
-          notice={{ kind: "error", title: "暂时无法加载账户，请重试" }}
+          notice={{
+            kind: "error",
+            title: "暂时无法加载账户，请重试",
+            action: {
+              label: "重新载入账户",
+              onClick: () => {
+                void accounts.refetch();
+              },
+            },
+          }}
         />
       ) : null}
       {positions.isError ? (
@@ -535,7 +561,10 @@ export function HoldingsPage() {
           正在加载当前持仓…
         </p>
       ) : null}
-      {accountItems.length === 0 && accounts.data !== undefined ? (
+      {!accountQueriesFetching &&
+      !accounts.isError &&
+      accountItems.length === 0 &&
+      accounts.data !== undefined ? (
         <section
           className="empty-state"
           aria-labelledby="empty-accounts-heading"
@@ -544,7 +573,7 @@ export function HoldingsPage() {
           <p>先创建一个固定币种账户，再添加当前持仓。</p>
         </section>
       ) : null}
-      {accountItems.length === 0 ? null : (
+      {accountQueriesFetching || accountItems.length === 0 ? null : (
         <section aria-labelledby="accounts-heading">
           <h2 id="accounts-heading">账户</h2>
           <ul className="record-list">
@@ -566,10 +595,11 @@ export function HoldingsPage() {
         </section>
       )}
       <AccountForm onNotice={setNotice} />
-      {accountItems.length === 0 ? null : (
+      {accountQueriesFetching || accountItems.length === 0 ? null : (
         <PositionForm accounts={accountItems} onNotice={setNotice} />
       )}
-      {!accounts.isSuccess ||
+      {accountQueriesFetching ||
+      !accounts.isSuccess ||
       !positions.isSuccess ||
       currentPositionRecords.length === 0 ? null : (
         <section aria-labelledby="positions-heading">
@@ -590,7 +620,8 @@ export function HoldingsPage() {
       {positions.isSuccess && positions.data.items.length === 0 ? (
         <p aria-live="polite">暂无当前持仓</p>
       ) : null}
-      {accounts.isSuccess &&
+      {!accountQueriesFetching &&
+      accounts.isSuccess &&
       positions.isSuccess &&
       currentPositionRecords.length !== positions.data.items.length ? (
         <StatusMessage
@@ -602,9 +633,7 @@ export function HoldingsPage() {
       </button>
       {showArchived ? (
         <div>
-          {accounts.isPending ||
-          archivedAccounts.isPending ||
-          archivedPositions.isPending ? (
+          {archivedDataFetching ? (
             <p role="status" aria-live="polite">
               正在加载已归档项目…
             </p>
@@ -626,13 +655,15 @@ export function HoldingsPage() {
               }}
             />
           ) : null}
-          {archivedAccounts.isSuccess &&
+          {!archivedDataFetching &&
+          archivedAccounts.isSuccess &&
           archivedPositions.isSuccess &&
           archivedAccountItems.length === 0 &&
           archivedPositions.data.items.length === 0 ? (
             <p aria-live="polite">没有已归档账户或持仓</p>
           ) : null}
-          {accounts.isSuccess &&
+          {!archivedDataFetching &&
+          accounts.isSuccess &&
           archivedAccounts.isSuccess &&
           archivedPositions.isSuccess &&
           archivedPositionRecords.length !==
@@ -644,7 +675,8 @@ export function HoldingsPage() {
               }}
             />
           ) : null}
-          {archivedAccountItems.length === 0 ? null : (
+          {accountQueriesFetching ||
+          archivedAccountItems.length === 0 ? null : (
             <section aria-labelledby="archived-accounts-heading">
               <h2 id="archived-accounts-heading">已归档账户</h2>
               <ul className="record-list">
@@ -658,7 +690,8 @@ export function HoldingsPage() {
               </ul>
             </section>
           )}
-          {!accounts.isSuccess ||
+          {archivedDataFetching ||
+          !accounts.isSuccess ||
           !archivedAccounts.isSuccess ||
           !archivedPositions.isSuccess ||
           archivedPositionRecords.length === 0 ? null : (
