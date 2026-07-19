@@ -92,6 +92,7 @@ def _repository_error(error: RepositoryError) -> JSONResponse:
         "CONCURRENT_MODIFICATION": 409,
         "ACCOUNT_HAS_ACTIVE_POSITIONS": 409,
         "DUPLICATE_POSITION": 409,
+        "POSITION_ARCHIVED": 409,
         "ACCOUNT_ARCHIVED": 409,
         "ACCOUNT_NOT_FOUND": 404,
         "POSITION_NOT_FOUND": 404,

@@ -333,7 +333,7 @@ async def test_archive_allows_recreate_but_restore_rejects_active_duplicate(
     assert restored.json()["error"]["code"] == "DUPLICATE_POSITION"
 
 
-async def test_archived_position_restores_when_no_active_duplicate_exists(
+async def test_explicit_restore_then_position_edit_succeeds(
     client: httpx.AsyncClient, database: Database
 ) -> None:
     account = await create_account(client)
@@ -350,11 +350,154 @@ async def test_archived_position_restores_when_no_active_duplicate_exists(
         json={"version": 2, "archived": False},
         headers=write_headers("restore-success"),
     )
+    edited = await client.patch(
+        f"/api/v1/positions/{created.json()['id']}",
+        json={"version": 3, "quantity": "25"},
+        headers=write_headers("edit-after-restore"),
+    )
 
     assert archived.status_code == 200
     assert restored.status_code == 200
     assert restored.json()["version"] == 3
     assert restored.json()["archived_at"] is None
+    assert edited.status_code == 200
+    assert edited.json()["version"] == 4
+    assert edited.json()["quantity"] == "25"
+
+
+async def test_archived_position_rejects_edits_without_mutating_state_or_idempotency(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    created = await create_position(client, account, instrument, key="archived-edit-create")
+    position_id = str(created.json()["id"])
+    archived = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json={"version": 1, "archived": True},
+        headers=write_headers("archived-edit-archive"),
+    )
+    body = {
+        "version": 2,
+        "quantity": "25",
+        "average_cost": "20.5",
+        "note": "must not change",
+    }
+    first = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json=body,
+        headers=write_headers("archived-edit-rejected"),
+    )
+    repeated = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json=body,
+        headers=write_headers("archived-edit-rejected"),
+    )
+    async with database.session() as session:
+        current = await session.get(PositionRow, position_id)
+        history_count = await session.scalar(
+            select(func.count())
+            .select_from(PositionVersionRow)
+            .where(PositionVersionRow.position_id == position_id)
+        )
+        claim = await session.get(
+            IdempotencyRow,
+            (f"PATCH:/api/v1/positions/{position_id}", hash_idempotency_key("archived-edit-rejected")),
+        )
+
+    assert archived.status_code == 200
+    for response in (first, repeated):
+        assert response.status_code == 409
+        assert response.json() == {"error": {"code": "POSITION_ARCHIVED"}}
+    assert current is not None
+    assert current.version == 2
+    assert format(current.quantity, "f") == created.json()["quantity"]
+    assert format(current.average_cost, "f") == created.json()["average_cost"]
+    assert current.note == created.json()["note"]
+    assert current.archived_at is not None
+    assert history_count == 2
+    assert claim is None
+
+
+async def test_archive_idempotency_replays_exact_archived_snapshot_after_restore(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    created = await create_position(client, account, instrument, key="archive-replay-create")
+    position_id = str(created.json()["id"])
+    archive_body = {"version": 1, "archived": True}
+    archive_key = "archive-replay-exact"
+    archived = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json=archive_body,
+        headers=write_headers(archive_key),
+    )
+    restored = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json={"version": 2, "archived": False},
+        headers=write_headers("archive-replay-restore"),
+    )
+    replay = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json=archive_body,
+        headers=write_headers(archive_key),
+    )
+    async with database.session() as session:
+        current = await session.get(PositionRow, position_id)
+
+    assert archived.status_code == restored.status_code == replay.status_code == 200
+    assert archived.json()["archived_at"] is not None
+    assert replay.json() == archived.json()
+    assert current is not None
+    assert current.version == 3
+    assert current.archived_at is None
+
+
+async def test_combined_restore_and_field_edits_are_atomic_and_replay_exactly(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    created = await create_position(client, account, instrument, key="combined-restore-create")
+    position_id = str(created.json()["id"])
+    archived = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json={"version": 1, "archived": True},
+        headers=write_headers("combined-restore-archive"),
+    )
+    restore_body = {
+        "version": 2,
+        "archived": False,
+        "quantity": "25",
+        "average_cost": "20.5",
+        "note": "恢复后 👩‍💻",
+    }
+    restore_key = "combined-restore-fields"
+    restored = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json=restore_body,
+        headers=write_headers(restore_key),
+    )
+    later = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json={"version": 3, "quantity": "30"},
+        headers=write_headers("combined-restore-later-edit"),
+    )
+    replay = await client.patch(
+        f"/api/v1/positions/{position_id}",
+        json=restore_body,
+        headers=write_headers(restore_key),
+    )
+
+    assert archived.status_code == restored.status_code == later.status_code == replay.status_code == 200
+    assert restored.json()["version"] == 3
+    assert restored.json()["archived_at"] is None
+    assert restored.json()["quantity"] == "25"
+    assert restored.json()["average_cost"] == "20.5"
+    assert restored.json()["note"] == "恢复后 👩‍💻"
+    assert later.json()["version"] == 4
+    assert replay.json() == restored.json()
 
 
 async def test_patch_uses_optimistic_concurrency(client: httpx.AsyncClient, database: Database) -> None:

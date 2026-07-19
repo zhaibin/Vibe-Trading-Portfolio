@@ -87,6 +87,11 @@ class PositionNotFound(RepositoryError):
         super().__init__("POSITION_NOT_FOUND")
 
 
+class PositionArchived(RepositoryError):
+    def __init__(self) -> None:
+        super().__init__("POSITION_ARCHIVED")
+
+
 class AccountArchived(RepositoryError):
     def __init__(self) -> None:
         super().__init__("ACCOUNT_ARCHIVED")
@@ -557,6 +562,8 @@ class PortfolioRepository:
             raise PositionNotFound()
         if current.version != command.version:
             raise ConcurrentModification(current.version)
+        if current.archived_at is not None and command.archived is not False:
+            raise PositionArchived()
         archived_at = current.archived_at
         if command.archived is True and archived_at is None:
             archived_at = now
