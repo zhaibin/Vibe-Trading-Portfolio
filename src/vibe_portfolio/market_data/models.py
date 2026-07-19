@@ -125,6 +125,6 @@ def validate_quote(quote: ProviderQuote, instrument: ProviderInstrument, now: da
             raise ValueError("quote timestamp future")
     except ProviderFailure:
         raise
-    except (DomainValidationError, TypeError, ValueError) as error:
-        raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID) from error
+    except (DomainValidationError, TypeError, ValueError):
+        raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID) from None
     return quote

@@ -1,3 +1,4 @@
+import traceback
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -5,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from vibe_portfolio.market_data import models as market_models
 from vibe_portfolio.market_data.models import (
     InstrumentCandidate,
     ProviderErrorCode,
@@ -113,3 +115,17 @@ def test_provider_quote_accepts_exact_future_boundary_and_returns_same_value() -
 def test_provider_quote_rejects_malformed_instrument_contract(invalid_instrument: ProviderInstrument) -> None:
     with pytest.raises(ProviderFailure, match="QUOTE_RESPONSE_INVALID"):
         validate_quote(quote(), invalid_instrument, now=NOW)
+
+
+def test_provider_quote_suppresses_validation_exception_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_price(_: Decimal) -> Decimal:
+        raise ValueError("provider-body-secret")
+
+    monkeypatch.setattr(market_models, "parse_price", fail_price)
+
+    with pytest.raises(ProviderFailure, match="QUOTE_RESPONSE_INVALID") as raised:
+        validate_quote(quote(), instrument(), now=NOW)
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__
+    assert "provider-body-secret" not in "".join(traceback.format_exception(raised.value))
