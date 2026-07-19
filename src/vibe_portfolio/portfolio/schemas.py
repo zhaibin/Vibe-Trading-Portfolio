@@ -149,10 +149,19 @@ class PositionPatch(BaseModel):
         return self
 
 
+class PositionInstrumentView(BaseModel):
+    canonical_symbol: str
+    name: str
+    market: Market
+    currency: Currency
+    asset_type: AssetType
+
+
 class PositionView(BaseModel):
     id: str
     account_id: str
     instrument_id: str
+    instrument: PositionInstrumentView
     quantity: DecimalOutput
     average_cost: DecimalOutput
     note: str | None

@@ -11,15 +11,19 @@ export type Position = components["schemas"]["PositionView"];
 
 export const holdingsKeys = {
   accounts: ["accounts"] as const,
+  accountList: (archived: boolean) => ["accounts", { archived }] as const,
   positions: (archived: boolean) => ["positions", { archived }] as const,
   summary: (currency: Currency) => ["summary", currency] as const,
 };
 
-export function accountsQuery() {
+export function accountsQuery(archived = false) {
   return queryOptions({
-    queryKey: holdingsKeys.accounts,
+    queryKey: holdingsKeys.accountList(archived),
     queryFn: async ({ signal }) => {
-      let page = await api.get("/api/v1/accounts", { signal });
+      let page = await api.get("/api/v1/accounts", {
+        params: { query: { archived } },
+        signal,
+      });
       const items = [...page.items];
       const cursors = new Set<string>();
       while (page.next_cursor !== null) {
@@ -28,7 +32,7 @@ export function accountsQuery() {
         }
         cursors.add(page.next_cursor);
         page = await api.get("/api/v1/accounts", {
-          params: { query: { cursor: page.next_cursor } },
+          params: { query: { archived, cursor: page.next_cursor } },
           signal,
         });
         items.push(...page.items);

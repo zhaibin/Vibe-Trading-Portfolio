@@ -39,6 +39,7 @@ from vibe_portfolio.portfolio.schemas import (
     InstrumentView,
     PortfolioSummary,
     PositionCreate,
+    PositionInstrumentView,
     PositionPatch,
     PositionView,
     SummaryPosition,
@@ -293,11 +294,22 @@ def instrument_response(instrument: InstrumentRow) -> dict[str, object]:
     ).model_dump(mode="json")
 
 
-def position_response(position: PositionRow) -> dict[str, object]:
+def _position_instrument_view(instrument: InstrumentRow) -> PositionInstrumentView:
+    return PositionInstrumentView(
+        canonical_symbol=instrument.canonical_symbol,
+        name=instrument.name,
+        market=Market(instrument.market),
+        currency=Currency(instrument.currency),
+        asset_type=AssetType(instrument.asset_type),
+    )
+
+
+def position_response(position: PositionRow, instrument: InstrumentRow) -> dict[str, object]:
     return PositionView(
         id=position.id,
         account_id=position.account_id,
         instrument_id=position.instrument_id,
+        instrument=_position_instrument_view(instrument),
         quantity=position.quantity,
         average_cost=position.average_cost,
         note=position.note,
@@ -308,7 +320,7 @@ def position_response(position: PositionRow) -> dict[str, object]:
     ).model_dump(mode="json")
 
 
-def position_version_response(position: PositionVersionRow) -> dict[str, object]:
+def position_version_response(position: PositionVersionRow, instrument: InstrumentRow) -> dict[str, object]:
     try:
         UUID(position.position_id)
         UUID(position.account_id)
@@ -328,6 +340,7 @@ def position_version_response(position: PositionVersionRow) -> dict[str, object]
                 "id": position.position_id,
                 "account_id": position.account_id,
                 "instrument_id": position.instrument_id,
+                "instrument": _position_instrument_view(instrument),
                 "quantity": parse_quantity(position.quantity),
                 "average_cost": parse_money(position.average_cost),
                 "note": note,
@@ -500,9 +513,13 @@ class PortfolioService:
             await self.repository.prune_expired(session, now)
             return PortfolioResponse(expected_status, response)
 
-    async def list_accounts(self, cursor: str | None, limit: int) -> tuple[list[AccountRow], str | None]:
+    async def list_accounts(
+        self, *, archived: bool, cursor: str | None, limit: int
+    ) -> tuple[list[AccountRow], str | None]:
         async with self.database.session() as session:
-            rows = await self.repository.list_accounts(session, cursor, limit)
+            rows = await self.repository.list_accounts(
+                session, archived=archived, cursor=cursor, limit=limit
+            )
         page = rows[:limit]
         return page, page[-1].id if len(rows) > limit else None
 
@@ -533,7 +550,12 @@ class PortfolioService:
                 history = await self.repository.position_version(session, resource_id, resource_version)
                 if history is None:
                     raise ReplayUnavailable()
-                return PortfolioResponse(expected_status, position_version_response(history))
+                replay_instrument = await self.repository.instrument(session, history.instrument_id)
+                if replay_instrument is None:
+                    raise ReplayUnavailable()
+                return PortfolioResponse(
+                    expected_status, position_version_response(history, replay_instrument)
+                )
             if isinstance(command, PositionCreate):
                 position = await self.repository.create_position(
                     session,
@@ -545,7 +567,10 @@ class PortfolioService:
                 assert position_id is not None
                 note = normalize_note(command.note) if "note" in command.model_fields_set else None
                 position = await self.repository.update_position(session, position_id, command, note, now)
-            response = position_response(position)
+            instrument = await self.repository.instrument(session, position.instrument_id)
+            if instrument is None:
+                raise ReplayUnavailable()
+            response = position_response(position, instrument)
             await self.repository.record_position_version(session, position)
             await self.repository.complete_resource_idempotency(
                 session,
@@ -564,7 +589,7 @@ class PortfolioService:
         account_id: str | None,
         cursor: str | None,
         limit: int,
-    ) -> tuple[list[PositionRow], str | None]:
+    ) -> tuple[list[tuple[PositionRow, InstrumentRow]], str | None]:
         async with self.database.session() as session:
             rows = await self.repository.list_positions(
                 session,
@@ -574,7 +599,7 @@ class PortfolioService:
                 limit=limit,
             )
         page = rows[:limit]
-        return page, page[-1].id if len(rows) > limit else None
+        return page, page[-1][0].id if len(rows) > limit else None
 
     async def summary(self, currency: Currency, now: datetime) -> PortfolioSummary:
         async with self.database.session() as session:

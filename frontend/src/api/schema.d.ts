@@ -452,6 +452,16 @@ export interface components {
             /** Quantity */
             quantity: string;
         };
+        /** PositionInstrumentView */
+        PositionInstrumentView: {
+            asset_type: components["schemas"]["AssetType"];
+            /** Canonical Symbol */
+            canonical_symbol: string;
+            currency: components["schemas"]["Currency"];
+            market: components["schemas"]["Market"];
+            /** Name */
+            name: string;
+        };
         /** PositionPatch */
         PositionPatch: {
             /** Archived */
@@ -480,6 +490,7 @@ export interface components {
             created_at: string;
             /** Id */
             id: string;
+            instrument: components["schemas"]["PositionInstrumentView"];
             /** Instrument Id */
             instrument_id: string;
             /** Note */
@@ -629,6 +640,7 @@ export interface operations {
     list_accounts_api_v1_accounts_get: {
         parameters: {
             query?: {
+                archived?: boolean;
                 cursor?: string | null;
                 limit?: number;
             };

@@ -189,6 +189,30 @@ async def create_position(
     )
 
 
+async def test_position_views_embed_local_instrument_identity_and_replay_it(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database, symbol="600519.SH")
+    key = "position-with-instrument-summary"
+    created = await create_position(client, account, instrument, key=key)
+    replay = await create_position(client, account, instrument, key=key)
+    listed = await client.get("/api/v1/positions")
+
+    expected = {
+        "canonical_symbol": "600519.SH",
+        "name": "示例-600519.SH",
+        "market": "CN_SH",
+        "currency": "CNY",
+        "asset_type": "equity",
+    }
+    assert created.status_code == replay.status_code == 201
+    assert listed.status_code == 200
+    assert created.json()["instrument"] == expected
+    assert replay.json() == created.json()
+    assert listed.json()["items"][0]["instrument"] == expected
+
+
 async def test_confirmed_candidate_is_required(client: httpx.AsyncClient) -> None:
     account = await create_account(client)
     response = await client.post(

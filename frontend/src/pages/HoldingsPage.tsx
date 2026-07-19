@@ -190,6 +190,72 @@ function AccountRecord({
   );
 }
 
+function ArchivedAccountRecord({
+  account,
+  onNotice,
+}: {
+  account: Account;
+  onNotice: (notice: Notice) => void;
+}) {
+  const queryClient = useQueryClient();
+  const restorePending = useRef<PendingSubmission | undefined>(undefined);
+  const restorePayload = { version: account.version, archived: false as const };
+  const restore = useMutation({
+    mutationFn: (key: string) =>
+      api.patch("/api/v1/accounts/{account_id}", restorePayload, key, {
+        params: { path: { account_id: account.id } },
+      }),
+    onSuccess: async () => {
+      restorePending.current = undefined;
+      onNotice({ kind: "success", title: "账户已恢复" });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: holdingsKeys.accounts }),
+        queryClient.invalidateQueries({
+          queryKey: holdingsKeys.summary(account.currency),
+        }),
+      ]);
+    },
+    onError: (error) => {
+      if (
+        error instanceof ApiError &&
+        error.code === "CONCURRENT_MODIFICATION"
+      ) {
+        onNotice({
+          kind: "error",
+          title: "记录已在其他位置更新",
+          action: {
+            label: "重新载入",
+            onClick: () => {
+              void queryClient.invalidateQueries({
+                queryKey: holdingsKeys.accounts,
+              });
+            },
+          },
+        });
+        return;
+      }
+      onNotice({ kind: "error", title: "暂时无法恢复账户，请重试" });
+    },
+  });
+
+  return (
+    <li className="record-card">
+      <strong>{account.name}</strong>
+      <span>{account.currency}</span>
+      <button
+        type="button"
+        disabled={restore.isPending}
+        aria-label={`恢复账户 ${account.name}`}
+        onClick={() =>
+          restore.mutate(retainedKey(restorePending, restorePayload))
+        }
+      >
+        恢复
+      </button>
+    </li>
+  );
+}
+
 function PositionRecord({
   account,
   archived,
@@ -284,7 +350,7 @@ function PositionRecord({
         onNotice({
           kind: "error",
           title: "所属账户已归档，无法恢复持仓",
-          detail: "当前 API 尚不提供归档账户列表与恢复入口。",
+          detail: "请先在已归档账户列表中恢复所属账户。",
         });
         return;
       }
@@ -325,8 +391,13 @@ function PositionRecord({
     },
   });
 
+  const identity = `${position.instrument.name} ${position.instrument.canonical_symbol} ${account.name}`;
+
   return (
     <li className="record-card">
+      <h3>
+        {position.instrument.name} {position.instrument.canonical_symbol}
+      </h3>
       <strong>数量 {position.quantity}</strong>
       <span>
         平均成本 {position.average_cost} {account.currency}
@@ -339,7 +410,7 @@ function PositionRecord({
           onClick={() =>
             updateArchive.mutate(retainedKey(archivePending, archivePayload))
           }
-          aria-label={`恢复持仓 ${position.quantity}`}
+          aria-label={`恢复持仓 ${identity}`}
         >
           恢复
         </button>
@@ -348,7 +419,7 @@ function PositionRecord({
           <button
             type="button"
             onClick={() => setEditing((value) => !value)}
-            aria-label={`编辑持仓 ${position.quantity}`}
+            aria-label={`编辑持仓 ${identity}`}
           >
             编辑
           </button>
@@ -356,7 +427,7 @@ function PositionRecord({
             ref={archiveTrigger}
             type="button"
             onClick={() => setConfirming(true)}
-            aria-label={`归档持仓 ${position.quantity}`}
+            aria-label={`归档持仓 ${identity}`}
           >
             归档
           </button>
@@ -404,13 +475,35 @@ function PositionRecord({
 export function HoldingsPage() {
   const [notice, setNotice] = useState<Notice>();
   const [showArchived, setShowArchived] = useState(false);
-  const accounts = useQuery(accountsQuery());
+  const accounts = useQuery(accountsQuery(false));
   const positions = useQuery(positionsQuery(false));
+  const archivedAccounts = useQuery({
+    ...accountsQuery(true),
+    enabled: showArchived,
+  });
   const archivedPositions = useQuery({
     ...positionsQuery(true),
     enabled: showArchived,
   });
   const accountItems = accounts.data?.items ?? [];
+  const archivedAccountItems = archivedAccounts.data?.items ?? [];
+  const allAccountItems = [...accountItems, ...archivedAccountItems];
+  const currentPositionRecords = (positions.data?.items ?? []).flatMap(
+    (position) => {
+      const account = accountItems.find(
+        (item) => item.id === position.account_id,
+      );
+      return account === undefined ? [] : [{ position, account }];
+    },
+  );
+  const archivedPositionRecords = (archivedPositions.data?.items ?? []).flatMap(
+    (position) => {
+      const account = allAccountItems.find(
+        (item) => item.id === position.account_id,
+      );
+      return account === undefined ? [] : [{ position, account }];
+    },
+  );
 
   return (
     <section aria-labelledby="holdings-heading">
@@ -436,6 +529,11 @@ export function HoldingsPage() {
             },
           }}
         />
+      ) : null}
+      {positions.isPending ? (
+        <p role="status" aria-live="polite">
+          正在加载当前持仓…
+        </p>
       ) : null}
       {accountItems.length === 0 && accounts.data !== undefined ? (
         <section
@@ -471,68 +569,115 @@ export function HoldingsPage() {
       {accountItems.length === 0 ? null : (
         <PositionForm accounts={accountItems} onNotice={setNotice} />
       )}
-      {positions.data === undefined ||
-      positions.data.items.length === 0 ? null : (
+      {!accounts.isSuccess ||
+      !positions.isSuccess ||
+      currentPositionRecords.length === 0 ? null : (
         <section aria-labelledby="positions-heading">
           <h2 id="positions-heading">当前持仓</h2>
-          <ul className="record-list">
-            {positions.data.items.map((position) => {
-              const account = accountItems.find(
-                (item) => item.id === position.account_id,
-              );
-              return account === undefined ? null : (
-                <PositionRecord
-                  key={position.id}
-                  position={position}
-                  account={account}
-                  archived={false}
-                  onNotice={setNotice}
-                />
-              );
-            })}
+          <ul className="record-list" aria-label="当前持仓">
+            {currentPositionRecords.map(({ position, account }) => (
+              <PositionRecord
+                key={position.id}
+                position={position}
+                account={account}
+                archived={false}
+                onNotice={setNotice}
+              />
+            ))}
           </ul>
         </section>
       )}
+      {positions.isSuccess && positions.data.items.length === 0 ? (
+        <p aria-live="polite">暂无当前持仓</p>
+      ) : null}
+      {accounts.isSuccess &&
+      positions.isSuccess &&
+      currentPositionRecords.length !== positions.data.items.length ? (
+        <StatusMessage
+          notice={{ kind: "error", title: "持仓所属账户不可用，请重新载入" }}
+        />
+      ) : null}
       <button type="button" onClick={() => setShowArchived((value) => !value)}>
         {showArchived ? "隐藏已归档项目" : "查看已归档项目"}
       </button>
       {showArchived ? (
-        <section aria-labelledby="archived-positions-heading">
-          <h2 id="archived-positions-heading">已归档持仓</h2>
-          {archivedPositions.isError ? (
+        <div>
+          {accounts.isPending ||
+          archivedAccounts.isPending ||
+          archivedPositions.isPending ? (
+            <p role="status" aria-live="polite">
+              正在加载已归档项目…
+            </p>
+          ) : null}
+          {archivedAccounts.isError || archivedPositions.isError ? (
             <StatusMessage
               notice={{
                 kind: "error",
-                title: "暂时无法加载已归档持仓，请重试",
+                title: "暂时无法加载已归档项目，请重试",
                 action: {
-                  label: "重新载入已归档持仓",
+                  label: "重新载入已归档项目",
                   onClick: () => {
-                    void archivedPositions.refetch();
+                    void Promise.all([
+                      archivedAccounts.refetch(),
+                      archivedPositions.refetch(),
+                    ]);
                   },
                 },
               }}
             />
           ) : null}
-          {archivedPositions.data?.items.length === 0 ? (
-            <p>没有已归档持仓。</p>
+          {archivedAccounts.isSuccess &&
+          archivedPositions.isSuccess &&
+          archivedAccountItems.length === 0 &&
+          archivedPositions.data.items.length === 0 ? (
+            <p aria-live="polite">没有已归档账户或持仓</p>
           ) : null}
-          <ul className="record-list">
-            {archivedPositions.data?.items.map((position) => {
-              const account = accountItems.find(
-                (item) => item.id === position.account_id,
-              );
-              return account === undefined ? null : (
-                <PositionRecord
-                  key={position.id}
-                  position={position}
-                  account={account}
-                  archived
-                  onNotice={setNotice}
-                />
-              );
-            })}
-          </ul>
-        </section>
+          {accounts.isSuccess &&
+          archivedAccounts.isSuccess &&
+          archivedPositions.isSuccess &&
+          archivedPositionRecords.length !==
+            archivedPositions.data.items.length ? (
+            <StatusMessage
+              notice={{
+                kind: "error",
+                title: "归档持仓所属账户不可用，请重新载入",
+              }}
+            />
+          ) : null}
+          {archivedAccountItems.length === 0 ? null : (
+            <section aria-labelledby="archived-accounts-heading">
+              <h2 id="archived-accounts-heading">已归档账户</h2>
+              <ul className="record-list">
+                {archivedAccountItems.map((account) => (
+                  <ArchivedAccountRecord
+                    key={account.id}
+                    account={account}
+                    onNotice={setNotice}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+          {!accounts.isSuccess ||
+          !archivedAccounts.isSuccess ||
+          !archivedPositions.isSuccess ||
+          archivedPositionRecords.length === 0 ? null : (
+            <section aria-labelledby="archived-positions-heading">
+              <h2 id="archived-positions-heading">已归档持仓</h2>
+              <ul className="record-list">
+                {archivedPositionRecords.map(({ position, account }) => (
+                  <PositionRecord
+                    key={position.id}
+                    position={position}
+                    account={account}
+                    archived
+                    onNotice={setNotice}
+                  />
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
       ) : null}
     </section>
   );

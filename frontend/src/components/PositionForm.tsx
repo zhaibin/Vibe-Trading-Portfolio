@@ -151,7 +151,7 @@ export function PositionEditForm({
   return (
     <form
       className="stack-form"
-      aria-label={`编辑持仓 ${position.quantity}`}
+      aria-label={`编辑持仓 ${position.instrument.name} ${position.instrument.canonical_symbol} ${account.name}`}
       onSubmit={submit}
       noValidate
     >
@@ -221,7 +221,7 @@ export function PositionForm({
   onNotice,
 }: {
   accounts: Account[];
-  onNotice: (notice: Notice) => void;
+  onNotice: (notice: Notice | undefined) => void;
 }) {
   const queryClient = useQueryClient();
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
@@ -237,41 +237,64 @@ export function PositionForm({
   const confirmPending = useRef<PendingSubmission | undefined>(undefined);
   const positionPending = useRef<PendingSubmission | undefined>(undefined);
   const searchController = useRef<AbortController | undefined>(undefined);
+  const searchRequestId = useRef(0);
 
   const search = useMutation({
-    mutationFn: async (q: string) => {
-      searchController.current?.abort();
-      const controller = new AbortController();
-      searchController.current = controller;
+    mutationFn: ({
+      q,
+      signal,
+    }: {
+      q: string;
+      requestId: number;
+      signal: AbortSignal;
+    }) => {
       return api.get("/api/v1/instruments/search", {
         params: { query: { q, limit: 10 } },
-        signal: controller.signal,
+        signal,
       });
     },
-    onSuccess: (results) => {
+    onSuccess: (results, request) => {
+      if (request.requestId !== searchRequestId.current) return;
       setCandidates(results);
       setConfirmed(undefined);
       if (results.length === 0) {
         onNotice({ kind: "success", title: "没有找到匹配的证券" });
+      } else {
+        onNotice(undefined);
       }
     },
-    onError: () => {
+    onError: (error, request) => {
+      if (
+        request.requestId !== searchRequestId.current ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        return;
+      }
       onNotice({ kind: "error", title: "证券搜索暂时不可用，请重试" });
     },
   });
 
   const confirmation = useMutation({
-    mutationFn: ({ candidateId, key }: { candidateId: string; key: string }) =>
+    mutationFn: ({
+      candidateId,
+      key,
+    }: {
+      candidateId: string;
+      key: string;
+      requestId: number;
+    }) =>
       api.post(
         "/api/v1/instruments/confirm",
         { candidate_id: candidateId },
         key,
       ),
-    onSuccess: (instrument) => {
+    onSuccess: (instrument, request) => {
+      if (request.requestId !== searchRequestId.current) return;
       confirmPending.current = undefined;
       setConfirmed(instrument);
     },
-    onError: () => {
+    onError: (_error, request) => {
+      if (request.requestId !== searchRequestId.current) return;
       onNotice({ kind: "error", title: "无法确认证券，请重新搜索" });
     },
   });
@@ -344,7 +367,15 @@ export function PositionForm({
     event.preventDefault();
     const q = searchText.trim();
     if (q !== "") {
-      search.mutate(q);
+      searchController.current?.abort();
+      const controller = new AbortController();
+      const requestId = searchRequestId.current + 1;
+      searchController.current = controller;
+      searchRequestId.current = requestId;
+      confirmPending.current = undefined;
+      setCandidates([]);
+      setConfirmed(undefined);
+      search.mutate({ q, requestId, signal: controller.signal });
     }
   }
 
@@ -418,10 +449,7 @@ export function PositionForm({
           value={searchText}
           onChange={(event) => setSearchText(event.currentTarget.value)}
         />
-        <button
-          disabled={search.isPending || searchText.trim() === ""}
-          type="submit"
-        >
+        <button disabled={searchText.trim() === ""} type="submit">
           {search.isPending ? "正在搜索…" : "搜索"}
         </button>
       </form>
@@ -449,6 +477,7 @@ export function PositionForm({
                   confirmation.mutate({
                     candidateId: candidate.candidate_id,
                     key: retainedKey(confirmPending, payload),
+                    requestId: searchRequestId.current,
                   });
                 }}
               >

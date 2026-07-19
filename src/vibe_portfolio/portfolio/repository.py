@@ -839,9 +839,12 @@ class PortfolioRepository:
         assert updated is not None
         return updated
 
-    async def list_accounts(self, session: AsyncSession, cursor: str | None, limit: int) -> list[AccountRow]:
+    async def list_accounts(
+        self, session: AsyncSession, *, archived: bool, cursor: str | None, limit: int
+    ) -> list[AccountRow]:
+        archived_filter = AccountRow.archived_at.is_not(None) if archived else AccountRow.archived_at.is_(None)
         statement: Select[tuple[AccountRow]] = (
-            select(AccountRow).where(AccountRow.archived_at.is_(None)).order_by(AccountRow.id)
+            select(AccountRow).where(archived_filter).order_by(AccountRow.id)
         )
         if cursor is not None:
             statement = statement.where(AccountRow.id > cursor)
@@ -998,16 +1001,19 @@ class PortfolioRepository:
         account_id: str | None,
         cursor: str | None,
         limit: int,
-    ) -> list[PositionRow]:
+    ) -> list[tuple[PositionRow, InstrumentRow]]:
         archived_filter = PositionRow.archived_at.is_not(None) if archived else PositionRow.archived_at.is_(None)
-        statement: Select[tuple[PositionRow]] = (
-            select(PositionRow).where(archived_filter).order_by(PositionRow.id)
+        statement = (
+            select(PositionRow, InstrumentRow)
+            .join(InstrumentRow, InstrumentRow.id == PositionRow.instrument_id)
+            .where(archived_filter)
+            .order_by(PositionRow.id)
         )
         if account_id is not None:
             statement = statement.where(PositionRow.account_id == account_id)
         if cursor is not None:
             statement = statement.where(PositionRow.id > cursor)
-        return list((await session.scalars(statement.limit(limit + 1))).all())
+        return list((await session.execute(statement.limit(limit + 1))).tuples().all())
 
     async def summary_records(self, session: AsyncSession, currency: str) -> SummaryRecords:
         accounts = list(

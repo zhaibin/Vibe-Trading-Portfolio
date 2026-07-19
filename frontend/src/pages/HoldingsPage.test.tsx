@@ -19,23 +19,42 @@ interface AccountFixture {
 
 interface ApiFixtureOptions {
   accountFailures?: number;
+  accountPatchFailures?: number;
   accountErrorCode?: string;
   accountPatchErrorCode?: string;
   accounts?: AccountFixture[];
+  accountListHandler?: (archived: boolean) => Promise<Response>;
   candidateCurrency?: "CNY" | "HKD" | "USD";
+  confirmationFailures?: number;
+  confirmationHandler?: (candidateId: string) => Promise<Response>;
   conflictPositionPatch?: boolean;
   positionCreateErrorFields?: Record<string, string>;
+  positionCreateFailures?: number;
   positionGetFailures?: number;
   positionPatchFailures?: number;
   positionPatchErrorCode?: string;
   positionOnLaterPage?: boolean;
   positions?: PositionFixture[];
+  positionListHandler?: (archived: boolean) => Promise<Response>;
+  searchHandler?: (
+    query: string,
+    signal: AbortSignal | undefined,
+  ) => Promise<Response>;
+}
+
+interface InstrumentFixture {
+  canonical_symbol: string;
+  name: string;
+  market: "CN_SH" | "CN_SZ" | "CN_BJ" | "HK" | "US";
+  currency: "CNY" | "HKD" | "USD";
+  asset_type: "equity" | "etf";
 }
 
 interface PositionFixture {
   id: string;
   account_id: string;
   instrument_id: string;
+  instrument: InstrumentFixture;
   quantity: string;
   average_cost: string;
   note: string | null;
@@ -49,6 +68,40 @@ function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function candidateResponse(
+  name: string,
+  symbol: string,
+  candidateId: string,
+): Response {
+  return json([
+    {
+      candidate_id: candidateId,
+      canonical_symbol: symbol,
+      name,
+      market: "US",
+      currency: "USD",
+      asset_type: "equity",
+      sources: ["synthetic-primary"],
+    },
+  ]);
+}
+
 function createApiFixture(options: ApiFixtureOptions = {}) {
   const accounts = (options.accounts ?? []).map((account) => ({ ...account }));
   const positions: PositionFixture[] = (options.positions ?? []).map(
@@ -57,23 +110,40 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
     }),
   );
   let accountFailures = options.accountFailures ?? 0;
+  let accountPatchFailures = options.accountPatchFailures ?? 0;
+  let confirmationFailures = options.confirmationFailures ?? 0;
   let conflictPositionPatch = options.conflictPositionPatch ?? false;
   let positionPatchFailures = options.positionPatchFailures ?? 0;
   let positionGetFailures = options.positionGetFailures ?? 0;
+  let positionCreateFailures = options.positionCreateFailures ?? 0;
   const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
-    if (url === "/api/v1/accounts" && method === "GET") {
-      return json({ items: accounts, next_cursor: null });
+    if (url.startsWith("/api/v1/accounts") && method === "GET") {
+      const archived =
+        new URL(url, "http://test.local").searchParams.get("archived") ===
+        "true";
+      if (options.accountListHandler !== undefined) {
+        return options.accountListHandler(archived);
+      }
+      return json({
+        items: accounts.filter(
+          (account) => (account.archived_at !== null) === archived,
+        ),
+        next_cursor: null,
+      });
     }
     if (url.startsWith("/api/v1/positions?archived=") && method === "GET") {
+      const archived =
+        new URL(url, "http://test.local").searchParams.get("archived") ===
+        "true";
+      if (options.positionListHandler !== undefined) {
+        return options.positionListHandler(archived);
+      }
       if (positionGetFailures > 0) {
         positionGetFailures -= 1;
         throw new TypeError("private positions load detail");
       }
-      const archived =
-        new URL(url, "http://test.local").searchParams.get("archived") ===
-        "true";
       const cursor = new URL(url, "http://test.local").searchParams.get(
         "cursor",
       );
@@ -112,6 +182,11 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
       return json(account, 201);
     }
     if (url.startsWith("/api/v1/instruments/search?") && method === "GET") {
+      if (options.searchHandler !== undefined) {
+        const query =
+          new URL(url, "http://test.local").searchParams.get("q") ?? "";
+        return options.searchHandler(query, init?.signal ?? undefined);
+      }
       return json([
         {
           candidate_id: "00000000-0000-4000-8000-000000000013",
@@ -125,6 +200,14 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
       ]);
     }
     if (url === "/api/v1/instruments/confirm" && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { candidate_id: string };
+      if (options.confirmationHandler !== undefined) {
+        return options.confirmationHandler(body.candidate_id);
+      }
+      if (confirmationFailures > 0) {
+        confirmationFailures -= 1;
+        throw new TypeError("private confirmation failure");
+      }
       return json(
         {
           id: "00000000-0000-4000-8000-000000000113",
@@ -140,6 +223,10 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
       );
     }
     if (url === "/api/v1/positions" && method === "POST") {
+      if (positionCreateFailures > 0) {
+        positionCreateFailures -= 1;
+        throw new TypeError("private position create failure");
+      }
       if (options.positionCreateErrorFields !== undefined) {
         return json(
           {
@@ -156,6 +243,13 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
         id: "00000000-0000-4000-8000-000000000213",
         account_id: String(body.account_id),
         instrument_id: String(body.instrument_id),
+        instrument: {
+          canonical_symbol: "TEST.US",
+          name: "示例科技",
+          market: "US",
+          currency: options.candidateCurrency ?? "USD",
+          asset_type: "equity",
+        },
         quantity: String(body.quantity),
         average_cost: String(body.average_cost),
         note: body.note === null ? null : String(body.note),
@@ -175,6 +269,10 @@ function createApiFixture(options: ApiFixtureOptions = {}) {
       }
       if (options.accountPatchErrorCode !== undefined) {
         return json({ error: { code: options.accountPatchErrorCode } }, 409);
+      }
+      if (accountPatchFailures > 0) {
+        accountPatchFailures -= 1;
+        throw new TypeError("private account edit failure");
       }
       const body = JSON.parse(String(init?.body)) as {
         name?: string;
@@ -540,12 +638,219 @@ describe("HoldingsPage trusted position flow", () => {
       "position-note-error",
     );
   });
+
+  it("silently aborts an older search and keeps the newer result", async () => {
+    const oldSearch = deferred<Response>();
+    const newSearch = deferred<Response>();
+    createApiFixture({
+      accounts: [usdAccount],
+      searchHandler: (query, signal) => {
+        if (query === "旧") {
+          signal?.addEventListener("abort", () =>
+            oldSearch.reject(new DOMException("aborted", "AbortError")),
+          );
+          return oldSearch.promise;
+        }
+        return newSearch.promise;
+      },
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+
+    await user.type(screen.getByLabelText("证券代码或名称"), "旧");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    await user.clear(screen.getByLabelText("证券代码或名称"));
+    await user.type(screen.getByLabelText("证券代码或名称"), "新");
+    await user.click(screen.getByRole("button", { name: /搜索/ }));
+    newSearch.resolve(candidateResponse("新证券", "NEW.US", "new-candidate"));
+
+    expect(
+      await screen.findByRole("article", { name: "新证券 NEW.US" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("旧证券 OLD.US")).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale successful search that completes after the latest result", async () => {
+    const oldSearch = deferred<Response>();
+    const newSearch = deferred<Response>();
+    createApiFixture({
+      accounts: [usdAccount],
+      searchHandler: (query) =>
+        query === "旧" ? oldSearch.promise : newSearch.promise,
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+
+    await user.type(screen.getByLabelText("证券代码或名称"), "旧");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    await user.clear(screen.getByLabelText("证券代码或名称"));
+    await user.type(screen.getByLabelText("证券代码或名称"), "新");
+    await user.click(screen.getByRole("button", { name: /搜索/ }));
+    newSearch.resolve(candidateResponse("新证券", "NEW.US", "new-candidate"));
+    await screen.findByRole("article", { name: "新证券 NEW.US" });
+    oldSearch.resolve(candidateResponse("旧证券", "OLD.US", "old-candidate"));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("article", { name: "旧证券 OLD.US" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("article", { name: "新证券 NEW.US" }),
+    ).toBeVisible();
+  });
+
+  it("ignores a stale confirmation that completes after a newer search", async () => {
+    const oldConfirmation = deferred<Response>();
+    createApiFixture({
+      accounts: [usdAccount],
+      searchHandler: async (query) =>
+        query === "旧"
+          ? candidateResponse("旧证券", "OLD.US", "old-candidate")
+          : candidateResponse("新证券", "NEW.US", "new-candidate"),
+      confirmationHandler: () => oldConfirmation.promise,
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+
+    await user.type(screen.getByLabelText("证券代码或名称"), "旧");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    await user.click(
+      await screen.findByRole("button", { name: "确认 旧证券 OLD.US" }),
+    );
+    await user.clear(screen.getByLabelText("证券代码或名称"));
+    await user.type(screen.getByLabelText("证券代码或名称"), "新");
+    await user.click(screen.getByRole("button", { name: /搜索/ }));
+    const newCandidate = await screen.findByRole("article", {
+      name: "新证券 NEW.US",
+    });
+    const newConfirm = within(newCandidate).getByRole("button", {
+      name: "确认 新证券 NEW.US",
+    });
+    oldConfirmation.resolve(
+      json({
+        id: "00000000-0000-4000-8000-000000000199",
+        canonical_symbol: "OLD.US",
+        name: "旧证券",
+        market: "US",
+        currency: "USD",
+        asset_type: "equity",
+      }),
+    );
+
+    await waitFor(() => expect(newConfirm).toBeEnabled());
+    expect(screen.queryByText(/已确认：旧证券/)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("article", { name: "新证券 NEW.US" }),
+    ).toBeVisible();
+  });
+
+  it("clears a prior search error after a successful new search", async () => {
+    let attempts = 0;
+    createApiFixture({
+      accounts: [usdAccount],
+      searchHandler: async () => {
+        attempts += 1;
+        return attempts === 1
+          ? json({ error: { code: "SEARCH_UNAVAILABLE" } }, 503)
+          : candidateResponse("恢复搜索", "BACK.US", "recovered-candidate");
+      },
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.type(screen.getByLabelText("证券代码或名称"), "第一次");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "证券搜索暂时不可用，请重试",
+    );
+    await user.clear(screen.getByLabelText("证券代码或名称"));
+    await user.type(screen.getByLabelText("证券代码或名称"), "第二次");
+    await user.click(screen.getByRole("button", { name: /搜索/ }));
+
+    await screen.findByRole("article", { name: "恢复搜索 BACK.US" });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("retains the confirmation key across a surfaced retry", async () => {
+    const { fetchMock } = createApiFixture({
+      accounts: [usdAccount],
+      confirmationFailures: 1,
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.type(screen.getByLabelText("证券代码或名称"), "TEST");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    const confirm = await screen.findByRole("button", {
+      name: "确认 示例科技 TEST.US",
+    });
+    await user.click(confirm);
+    await screen.findByText("无法确认证券，请重新搜索");
+    await user.click(confirm);
+    await screen.findByLabelText("持仓数量");
+
+    const keys = fetchMock.mock.calls
+      .filter(
+        ([input, init]) =>
+          String(input) === "/api/v1/instruments/confirm" &&
+          init?.method === "POST",
+      )
+      .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"));
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(1);
+  });
+
+  it("retains position values and key across a surfaced create retry", async () => {
+    const { fetchMock } = createApiFixture({
+      accounts: [usdAccount],
+      positionCreateFailures: 1,
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.type(screen.getByLabelText("证券代码或名称"), "TEST");
+    await user.click(screen.getByRole("button", { name: "搜索" }));
+    await user.click(
+      await screen.findByRole("button", { name: "确认 示例科技 TEST.US" }),
+    );
+    await user.type(await screen.findByLabelText("持仓数量"), "3.25");
+    await user.type(screen.getByLabelText("平均成本"), "9.5");
+    await user.type(screen.getByLabelText("备注（可选）"), "保留这些值");
+    await user.click(screen.getByRole("button", { name: "添加持仓" }));
+    await screen.findByText("暂时无法保存持仓，请重试");
+    expect(screen.getByLabelText("持仓数量")).toHaveValue("3.25");
+    expect(screen.getByLabelText("平均成本")).toHaveValue("9.5");
+    expect(screen.getByLabelText("备注（可选）")).toHaveValue("保留这些值");
+    await user.click(screen.getByRole("button", { name: "添加持仓" }));
+    await screen.findByText("持仓已创建");
+
+    const keys = fetchMock.mock.calls
+      .filter(
+        ([input, init]) =>
+          String(input) === "/api/v1/positions" && init?.method === "POST",
+      )
+      .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"));
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(1);
+  });
 });
 
 const activePosition: PositionFixture = {
   id: "00000000-0000-4000-8000-000000000301",
   account_id: usdAccount.id,
   instrument_id: "00000000-0000-4000-8000-000000000113",
+  instrument: {
+    canonical_symbol: "TEST.US",
+    name: "示例科技",
+    market: "US",
+    currency: "USD",
+    asset_type: "equity",
+  },
   quantity: "2.5",
   average_cost: "8.25",
   note: "测试持仓",
@@ -555,7 +860,45 @@ const activePosition: PositionFixture = {
   archived_at: null,
 };
 
+const secondSameQuantityPosition: PositionFixture = {
+  ...activePosition,
+  id: "00000000-0000-4000-8000-000000000302",
+  instrument_id: "00000000-0000-4000-8000-000000000114",
+  instrument: {
+    canonical_symbol: "OTHER.US",
+    name: "另一证券",
+    market: "US",
+    currency: "USD",
+    asset_type: "etf",
+  },
+};
+
 describe("HoldingsPage edit and archive flow", () => {
+  it("distinguishes same-quantity positions by instrument and account identity", async () => {
+    createApiFixture({
+      accounts: [usdAccount],
+      positions: [activePosition, secondSameQuantityPosition],
+    });
+    renderHoldings();
+
+    expect(
+      await screen.findByRole("heading", { name: "示例科技 TEST.US" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "另一证券 OTHER.US" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "编辑持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "编辑持仓 另一证券 OTHER.US 示例美元账户",
+      }),
+    ).toBeVisible();
+  });
+
   it("edits an account without allowing its fixed currency to change", async () => {
     const { fetchMock } = createApiFixture({ accounts: [usdAccount] });
     const user = userEvent.setup();
@@ -606,6 +949,39 @@ describe("HoldingsPage edit and archive flow", () => {
     expect(screen.queryByText("记录已在其他位置更新")).not.toBeInTheDocument();
   });
 
+  it("retains account edit values and key across a surfaced retry", async () => {
+    const { fetchMock } = createApiFixture({
+      accounts: [usdAccount],
+      accountPatchFailures: 1,
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.click(
+      screen.getByRole("button", { name: "编辑账户 示例美元账户" }),
+    );
+    const edit = screen.getByRole("form", { name: "编辑账户 示例美元账户" });
+    await user.clear(within(edit).getByLabelText("账户名称"));
+    await user.type(within(edit).getByLabelText("账户名称"), "保留编辑账户");
+    await user.type(within(edit).getByLabelText("现金余额（可选）"), "88.5");
+    await user.click(within(edit).getByRole("button", { name: "保存账户" }));
+    await screen.findByText("暂时无法保存账户，请重试");
+    expect(within(edit).getByLabelText("账户名称")).toHaveValue("保留编辑账户");
+    expect(within(edit).getByLabelText("现金余额（可选）")).toHaveValue("88.5");
+    await user.click(within(edit).getByRole("button", { name: "保存账户" }));
+    await screen.findByText("账户已更新");
+
+    const keys = fetchMock.mock.calls
+      .filter(
+        ([input, init]) =>
+          String(input) === `/api/v1/accounts/${usdAccount.id}` &&
+          init?.method === "PATCH",
+      )
+      .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"));
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(1);
+  });
+
   it("uses inline account archive confirmation and restores trigger focus on cancel", async () => {
     const { fetchMock } = createApiFixture({ accounts: [usdAccount] });
     const confirmSpy = vi.spyOn(window, "confirm");
@@ -643,6 +1019,49 @@ describe("HoldingsPage edit and archive flow", () => {
     confirmSpy.mockRestore();
   });
 
+  it("moves an archived account out of active records and restores it explicitly", async () => {
+    const { fetchMock } = createApiFixture({ accounts: [usdAccount] });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    const archive = screen.getByRole("button", {
+      name: "归档账户 示例美元账户",
+    });
+    await waitFor(() => expect(archive).toBeEnabled());
+    await user.click(archive);
+    await user.click(
+      within(screen.getByRole("region", { name: "确认归档账户" })).getByRole(
+        "button",
+        { name: "确认归档" },
+      ),
+    );
+    await screen.findByText("账户已归档");
+    await waitFor(() =>
+      expect(screen.queryByText("示例美元账户")).not.toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+    expect(
+      await screen.findByRole("heading", { name: "已归档账户" }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole("button", { name: "恢复账户 示例美元账户" }),
+    );
+    expect(await screen.findByText("账户已恢复")).toBeVisible();
+    expect(await screen.findByText("示例美元账户")).toBeVisible();
+    const bodies = fetchMock.mock.calls
+      .filter(
+        ([input, init]) =>
+          String(input) === `/api/v1/accounts/${usdAccount.id}` &&
+          init?.method === "PATCH",
+      )
+      .map(([, init]) => JSON.parse(String(init?.body)) as object);
+    expect(bodies).toEqual([
+      { version: 1, archived: true },
+      { version: 2, archived: false },
+    ]);
+  });
+
   it("disables account archive while an active position exists", async () => {
     createApiFixture({ accounts: [usdAccount], positions: [activePosition] });
     renderHoldings();
@@ -652,6 +1071,88 @@ describe("HoldingsPage edit and archive flow", () => {
     });
     expect(archive).toBeDisabled();
     expect(screen.getByText("请先归档该账户的全部持仓")).toBeVisible();
+  });
+
+  it("announces active and archived position loading and empty states without empty lists", async () => {
+    const archivedPage = deferred<Response>();
+    createApiFixture({
+      accounts: [usdAccount],
+      positionListHandler: (archived) =>
+        archived
+          ? archivedPage.promise
+          : Promise.resolve(json({ items: [], next_cursor: null })),
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+
+    expect(screen.getByText("正在加载当前持仓…")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    expect(await screen.findByText("暂无当前持仓")).toHaveAttribute(
+      "aria-live",
+      "polite",
+    );
+    expect(
+      screen.queryByRole("list", { name: "当前持仓" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+    expect(screen.getByText("正在加载已归档项目…")).toHaveAttribute(
+      "role",
+      "status",
+    );
+    archivedPage.resolve(json({ items: [], next_cursor: null }));
+    expect(await screen.findByText("没有已归档账户或持仓")).toHaveAttribute(
+      "aria-live",
+      "polite",
+    );
+    expect(
+      screen.queryByRole("list", { name: "已归档项目" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not render a position list before its account join is available", async () => {
+    const activeAccounts = deferred<Response>();
+    createApiFixture({
+      positions: [activePosition],
+      accountListHandler: (archived) =>
+        archived
+          ? Promise.resolve(json({ items: [], next_cursor: null }))
+          : activeAccounts.promise,
+    });
+    renderHoldings();
+
+    expect(
+      screen.queryByRole("list", { name: "当前持仓" }),
+    ).not.toBeInTheDocument();
+    activeAccounts.resolve(json({ items: [usdAccount], next_cursor: null }));
+    expect(await screen.findByRole("list", { name: "当前持仓" })).toBeVisible();
+  });
+
+  it("does not render archived positions before both account sets are available", async () => {
+    const archivedAccounts = deferred<Response>();
+    const archivedPosition = {
+      ...activePosition,
+      archived_at: "2026-07-20T01:00:00Z",
+    };
+    createApiFixture({
+      accounts: [usdAccount],
+      positions: [archivedPosition],
+      accountListHandler: (archived) =>
+        archived
+          ? archivedAccounts.promise
+          : Promise.resolve(json({ items: [usdAccount], next_cursor: null })),
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("示例美元账户");
+    await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
+
+    expect(screen.getByText("正在加载已归档项目…")).toBeVisible();
+    expect(screen.queryByText("已归档持仓")).not.toBeInTheDocument();
+    archivedAccounts.resolve(json({ items: [], next_cursor: null }));
+    expect(await screen.findByText("已归档持仓")).toBeVisible();
   });
 
   it("loads later position pages before allowing account archive", async () => {
@@ -740,7 +1241,11 @@ describe("HoldingsPage edit and archive flow", () => {
     renderHoldings();
     await screen.findByText("数量 2.5");
 
-    await user.click(screen.getByRole("button", { name: "归档持仓 2.5" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "归档持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
     await user.click(
       within(screen.getByRole("region", { name: "确认归档持仓" })).getByRole(
         "button",
@@ -751,11 +1256,17 @@ describe("HoldingsPage edit and archive flow", () => {
     await user.click(screen.getByRole("button", { name: "查看已归档项目" }));
 
     expect(await screen.findByText("已归档持仓")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "恢复持仓 2.5" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "恢复持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
     expect(await screen.findByText("持仓已恢复")).toBeVisible();
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "恢复持仓 2.5" }),
+        screen.queryByRole("button", {
+          name: "恢复持仓 示例科技 TEST.US 示例美元账户",
+        }),
       ).not.toBeInTheDocument(),
     );
     const patchBodies = fetchMock.mock.calls
@@ -780,7 +1291,11 @@ describe("HoldingsPage edit and archive flow", () => {
     const user = userEvent.setup();
     renderHoldings();
     await screen.findByText("数量 2.5");
-    await user.click(screen.getByRole("button", { name: "归档持仓 2.5" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "归档持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
     const region = screen.getByRole("region", { name: "确认归档持仓" });
     await user.click(within(region).getByRole("button", { name: "确认归档" }));
     await screen.findByText("暂时无法归档持仓，请重试");
@@ -807,7 +1322,11 @@ describe("HoldingsPage edit and archive flow", () => {
     const user = userEvent.setup();
     renderHoldings();
     await screen.findByText("数量 2.5");
-    await user.click(screen.getByRole("button", { name: "归档持仓 2.5" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "归档持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
     await user.click(
       within(screen.getByRole("region", { name: "确认归档持仓" })).getByRole(
         "button",
@@ -840,7 +1359,11 @@ describe("HoldingsPage edit and archive flow", () => {
     const user = userEvent.setup();
     renderHoldings();
     await screen.findByText("数量 2.5");
-    await user.click(screen.getByRole("button", { name: "归档持仓 2.5" }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "归档持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
     await user.click(
       within(screen.getByRole("region", { name: "确认归档持仓" })).getByRole(
         "button",
@@ -877,8 +1400,14 @@ describe("HoldingsPage edit and archive flow", () => {
     const user = userEvent.setup();
     renderHoldings();
     await screen.findByText("数量 2.5");
-    await user.click(screen.getByRole("button", { name: "编辑持仓 2.5" }));
-    const edit = screen.getByRole("form", { name: "编辑持仓 2.5" });
+    await user.click(
+      screen.getByRole("button", {
+        name: "编辑持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
+    const edit = screen.getByRole("form", {
+      name: "编辑持仓 示例科技 TEST.US 示例美元账户",
+    });
     await user.clear(within(edit).getByLabelText("持仓数量"));
     await user.type(within(edit).getByLabelText("持仓数量"), "3");
     await user.click(within(edit).getByRole("button", { name: "保存持仓" }));
@@ -898,5 +1427,44 @@ describe("HoldingsPage edit and archive flow", () => {
         ).length,
       ).toBeGreaterThan(beforeReload),
     );
+  });
+
+  it("retains position edit values and key across a surfaced retry", async () => {
+    const { fetchMock } = createApiFixture({
+      accounts: [usdAccount],
+      positions: [activePosition],
+      positionPatchFailures: 1,
+    });
+    const user = userEvent.setup();
+    renderHoldings();
+    await screen.findByText("数量 2.5");
+    await user.click(
+      screen.getByRole("button", {
+        name: "编辑持仓 示例科技 TEST.US 示例美元账户",
+      }),
+    );
+    const edit = screen.getByRole("form", {
+      name: "编辑持仓 示例科技 TEST.US 示例美元账户",
+    });
+    await user.clear(within(edit).getByLabelText("持仓数量"));
+    await user.type(within(edit).getByLabelText("持仓数量"), "4.5");
+    await user.clear(within(edit).getByLabelText("平均成本"));
+    await user.type(within(edit).getByLabelText("平均成本"), "7.25");
+    await user.click(within(edit).getByRole("button", { name: "保存持仓" }));
+    await screen.findByText("暂时无法保存持仓，请重试");
+    expect(within(edit).getByLabelText("持仓数量")).toHaveValue("4.5");
+    expect(within(edit).getByLabelText("平均成本")).toHaveValue("7.25");
+    await user.click(within(edit).getByRole("button", { name: "保存持仓" }));
+    await screen.findByText("持仓已更新");
+
+    const keys = fetchMock.mock.calls
+      .filter(
+        ([input, init]) =>
+          String(input) === `/api/v1/positions/${activePosition.id}` &&
+          init?.method === "PATCH",
+      )
+      .map(([, init]) => new Headers(init?.headers).get("Idempotency-Key"));
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(1);
   });
 });

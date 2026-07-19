@@ -24,6 +24,7 @@ from vibe_portfolio.portfolio.schemas import (
     InstrumentView,
     PortfolioSummary,
     PositionCreate,
+    PositionInstrumentView,
     PositionPatch,
     PositionView,
 )
@@ -66,11 +67,18 @@ def _instrument_view(instrument: InstrumentRow) -> InstrumentView:
     )
 
 
-def _position_view(position: PositionRow) -> PositionView:
+def _position_view(position: PositionRow, instrument: InstrumentRow) -> PositionView:
     return PositionView(
         id=position.id,
         account_id=position.account_id,
         instrument_id=position.instrument_id,
+        instrument=PositionInstrumentView(
+            canonical_symbol=instrument.canonical_symbol,
+            name=instrument.name,
+            market=Market(instrument.market),
+            currency=Currency(instrument.currency),
+            asset_type=AssetType(instrument.asset_type),
+        ),
         quantity=position.quantity,
         average_cost=position.average_cost,
         note=position.note,
@@ -125,9 +133,17 @@ def build_portfolio_router(service: PortfolioService) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["portfolio"], route_class=PortfolioRoute)
 
     @router.get("/accounts", response_model=CursorPage[AccountView], responses={503: {"model": ErrorEnvelope}})
-    async def list_accounts(cursor: UUID | None = None, limit: Annotated[int, Query(ge=1, le=100)] = 50) -> object:
+    async def list_accounts(
+        archived: bool = False,
+        cursor: UUID | None = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> object:
         try:
-            accounts, next_cursor = await service.list_accounts(None if cursor is None else str(cursor), limit)
+            accounts, next_cursor = await service.list_accounts(
+                archived=archived,
+                cursor=None if cursor is None else str(cursor),
+                limit=limit,
+            )
             return CursorPage(items=[_account_view(account) for account in accounts], next_cursor=next_cursor)
         except DatabaseBusyError:
             return api_error("DATABASE_BUSY", 503)
@@ -215,7 +231,10 @@ def build_portfolio_router(service: PortfolioService) -> APIRouter:
                 cursor=None if cursor is None else str(cursor),
                 limit=limit,
             )
-            return CursorPage(items=[_position_view(position) for position in positions], next_cursor=next_cursor)
+            return CursorPage(
+                items=[_position_view(position, instrument) for position, instrument in positions],
+                next_cursor=next_cursor,
+            )
         except DatabaseBusyError:
             return api_error("DATABASE_BUSY", 503)
         except DatabaseStartupError:

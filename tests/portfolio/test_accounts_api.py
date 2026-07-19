@@ -194,6 +194,36 @@ async def test_list_accounts_is_cursor_paginated(client: httpx.AsyncClient) -> N
     assert second.json()["items"][0]["id"] != first.json()["items"][0]["id"]
 
 
+async def test_archived_accounts_are_listed_separately_and_restore_roundtrip(
+    client: httpx.AsyncClient,
+) -> None:
+    account = await create_account(client, name="归档后恢复")
+    archived = await client.patch(
+        f"/api/v1/accounts/{account['id']}",
+        json={"version": 1, "archived": True},
+        headers=write_headers("archive-list-roundtrip"),
+    )
+
+    active_list = await client.get("/api/v1/accounts")
+    archived_list = await client.get("/api/v1/accounts?archived=true&limit=1")
+    restored = await client.patch(
+        f"/api/v1/accounts/{account['id']}",
+        json={"version": 2, "archived": False},
+        headers=write_headers("restore-list-roundtrip"),
+    )
+    active_after_restore = await client.get("/api/v1/accounts")
+    archived_after_restore = await client.get("/api/v1/accounts?archived=true")
+
+    assert archived.status_code == restored.status_code == 200
+    assert active_list.json()["items"] == []
+    assert archived_list.json()["items"][0]["id"] == account["id"]
+    assert archived_list.json()["items"][0]["archived_at"] is not None
+    assert archived_list.json()["next_cursor"] is None
+    assert active_after_restore.json()["items"][0]["id"] == account["id"]
+    assert active_after_restore.json()["items"][0]["version"] == 3
+    assert archived_after_restore.json()["items"] == []
+
+
 async def test_invalid_request_validation_uses_sanitized_stable_envelope(client: httpx.AsyncClient) -> None:
     response = await client.post(
         "/api/v1/accounts",
