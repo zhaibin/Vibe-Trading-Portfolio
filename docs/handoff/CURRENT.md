@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-19
 **Project:** Vibe-Trading Portfolio sidecar
-**Current milestone:** Milestone 0 compatibility foundation completed; Experience Milestone 1A WebUI/independent-market-data design approved and audited; implementation planning not started
+**Current milestone:** Milestone 0 compatibility foundation completed; Experience Milestone 1A design approved/audited and TDD implementation plan completed; implementation not started
 
 ## Start here
 
@@ -16,7 +16,10 @@ The following state was verified after local stabilization testing on 2026-07-19
 - Last verified active branch: `main`
 - Local stabilization integration: `main` fast-forwarded from `3f3e081` to `96aeb56` after the merged-result gate passed
 - Last verified published head: `c65c004` (`docs: record successful remote publication`)
-- Approved Experience Milestone 1A design: `ee60736` (`docs: design portfolio experience webui`); this local design commit has not yet been pushed
+- Approved Experience Milestone 1A design: `ee60736` (`docs: design portfolio experience webui`)
+- Design handoff update: `4a58efc` (`docs: record portfolio experience design`)
+- Reviewed TDD implementation plan: `24f253a` (`docs: plan portfolio experience webui`)
+- These Experience Milestone 1A documentation commits are local and have not yet been pushed
 - Live stabilization commits: `c15c12f` (`fix: poll for runtime terminal proof`), `7a26e3a` (`fix: validate goal-aware MCP probe events`), and `ef6938c` (`fix: retry runtime cancel registration race`)
 - Live stabilization design/plan commits: `e1316f7`, `1d207b9`, and `3f3e081`
 - Integrated handoff branch: `docs/new-session-handoff`
@@ -81,6 +84,7 @@ The approved next milestone is now specified, but none of its runtime capability
 
 - [Product design](../superpowers/specs/2026-07-18-personal-portfolio-sidecar-design.md)
 - [Experience Milestone 1A WebUI and independent market data design](../superpowers/specs/2026-07-19-portfolio-experience-webui-design.md)
+- [Experience Milestone 1A TDD implementation plan](../superpowers/plans/2026-07-19-portfolio-experience-webui.md)
 - [Milestone 0 implementation plan](../superpowers/plans/2026-07-18-vibe-compatibility-spike.md)
 - [New-session handoff design](../superpowers/specs/2026-07-19-new-session-handoff-design.md)
 - [Live-contract stabilization design](../superpowers/specs/2026-07-19-live-contract-stabilization-design.md)
@@ -119,14 +123,16 @@ The route-only, live runtime, and full MCP commands are intentionally documented
 - The first WebUI is a same-origin React/TypeScript SPA served by FastAPI on loopback. It has no login; Host/Origin/Fetch Metadata/CSP controls are mandatory compensations, and non-loopback deployment remains blocked.
 - Public quote endpoints remain replaceable external dependencies with availability and usage-condition risk. Default tests must use fakes; real-provider smoke tests are opt-in and skipped means not run.
 - Snapshot holdings cannot provide transaction-derived cost basis, realized returns, or reconciled performance. A future ledger migration must create explicit opening events with provenance and must not invent transaction history.
+- The implementation plan is a single ordered 16-task plan because persistence, market data, and WebUI share one contract and are not independently releasable. It uses router factories and independently injected database/portfolio/market services to avoid circular imports and preserve diagnostic-only tests.
+- Frontend dependencies were resolved against the npm registry on 2026-07-19 and will be pinned by `package-lock.json`; CI standardizes on Node 24 even though the current workstation reports Node 26.5.0.
 
 ## Current blockers
 
-Current code/test blockers: none known. The Experience Milestone 1A design audit resolved its architecture, data, security, failure, and test-boundary conflicts. The written specification still requires final user review before an implementation plan is produced.
+Current code/test blockers: none known. The written Experience Milestone 1A specification has been approved, and its implementation plan has completed specification-coverage, placeholder, type/interface, packaging, security, and execution-path self-review. Runtime capability remains unchanged until plan execution begins.
 
 ## Recommended next step
 
-Have the user review the written [Experience Milestone 1A design](../superpowers/specs/2026-07-19-portfolio-experience-webui-design.md). After explicit approval, use the planning workflow to produce a TDD implementation plan covering backend persistence/API, independent provider adapters, the React WebUI, security middleware, migrations, hermetic E2E, and retained compatibility gates.
+Choose the plan execution workflow: recommended subagent-driven execution with a fresh worker and two-stage review per task, or inline execution in this task with checkpointed batches. Then execute the [Experience Milestone 1A plan](../superpowers/plans/2026-07-19-portfolio-experience-webui.md) from Task 1 without skipping RED/GREEN evidence.
 
 ## Latest design verification
 
@@ -135,6 +141,15 @@ Have the user review the written [Experience Milestone 1A design](../superpowers
 - A live CodeGraph audit confirmed that the current FastAPI app has three compatibility operations composed in `create_app`; the new design preserves their semantics while intentionally replacing the old exact-total-route test with a scoped compatibility-route invariant.
 - The audit records 15 resolved findings and six accepted residual risks, including the snapshot-versus-ledger staging boundary, loopback no-auth limitation, quote-provider instability, and non-calendar-aware freshness rule.
 - No Python, frontend, live-provider, Vibe runtime, or MCP test gate was rerun because this change is documentation-only. The previously recorded test results remain dated evidence, not fresh verification.
+
+## Latest plan verification
+
+- The implementation plan contains 16 sequential tasks, 16 file/interface sections, and 16 planned commits across 1,477 lines.
+- Every task includes explicit RED and GREEN commands; the plan has a specification-coverage map and no unassigned Experience Milestone 1A requirement.
+- Placeholder/ambiguous-instruction and credential-pattern scans returned no matches; all 86 Markdown fence lines are balanced.
+- `git diff --cached --check` passed before commit `24f253a`.
+- Planning review corrected package-relative SPA assets, localhost/127.0.0.1 Origin handling, the zero-body MCP probe exception, Decimal JSON decoding, provider rate bounds, Beijing symbol identity, retained idempotency keys, candidate trust, retention, and a real two-process E2E restart.
+- No source, lockfile, migration, generated frontend, runtime data, or test behavior changed, so implementation gates were not rerun.
 
 ## End-of-session update checklist
 
