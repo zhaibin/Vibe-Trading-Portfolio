@@ -2,7 +2,8 @@
 
 import json
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -19,10 +20,32 @@ def _timestamp(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return value
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _money(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("money must be a string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise ValueError("money is invalid") from error
+    exponent = parsed.as_tuple().exponent
+    if (
+        not parsed.is_finite()
+        or parsed < 0
+        or parsed > Decimal("1000000000000")
+        or (isinstance(exponent, int) and -exponent > 6)
+    ):
+        raise ValueError("money is outside the supported domain")
+    return format(parsed, "f")
 
 
 def _snapshot(row: RowMapping) -> dict[str, object] | None:
@@ -39,7 +62,10 @@ def _snapshot(row: RowMapping) -> dict[str, object] | None:
     version = value.get("version")
     name = value.get("name")
     currency = value.get("currency")
-    cash_balance = value.get("cash_balance")
+    try:
+        cash_balance = _money(value.get("cash_balance"))
+    except ValueError:
+        return None
     created_at = _timestamp(value.get("created_at"))
     updated_at = _timestamp(value.get("updated_at"))
     archived_value = value.get("archived_at")
@@ -59,7 +85,6 @@ def _snapshot(row: RowMapping) -> dict[str, object] | None:
         or not isinstance(name, str)
         or not 1 <= len(name) <= 80
         or currency not in {"CNY", "HKD", "USD"}
-        or (cash_balance is not None and not isinstance(cash_balance, str))
         or created_at is None
         or updated_at is None
         or (archived_value is not None and archived_at is None)

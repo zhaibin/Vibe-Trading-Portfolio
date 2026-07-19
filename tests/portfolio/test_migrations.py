@@ -227,6 +227,80 @@ def test_privacy_migration_moves_valid_replay_state_to_history_and_drops_respons
     assert replay_metadata == (account_id, 1, 201)
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("cash_balance", "-1"),
+        ("cash_balance", "1.0000001"),
+        ("created_at", "2026-07-19T00:00:00"),
+        ("updated_at", "2026-07-19T00:00:00"),
+    ],
+    ids=["negative-money", "overprecision-money", "naive-created-at", "naive-updated-at"],
+)
+def test_privacy_migration_skips_parseable_invalid_completed_snapshot(
+    tmp_path: Path, field: str, invalid_value: str
+) -> None:
+    path = tmp_path / "portfolio.db"
+    _upgrade_database(path, "20260719_0002")
+    account_id = "22222222-2222-4222-8222-222222222222"
+    snapshot: dict[str, object] = {
+        "id": account_id,
+        "name": "无效迁移历史",
+        "currency": "CNY",
+        "cash_balance": "1.000000",
+        "version": 1,
+        "created_at": "2026-07-19T00:00:00Z",
+        "updated_at": "2026-07-19T00:00:00Z",
+        "archived_at": None,
+    }
+    snapshot[field] = invalid_value
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "insert into accounts values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                account_id,
+                "当前有效状态",
+                "当前有效状态",
+                "CNY",
+                "2.000000",
+                2,
+                "2026-07-19T00:00:00Z",
+                "2026-07-19T01:00:00Z",
+                None,
+            ),
+        )
+        connection.execute(
+            "insert into idempotency_records values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "POST:/api/v1/accounts",
+                "c" * 64,
+                "d" * 64,
+                "completed",
+                account_id,
+                201,
+                "2026-07-19T00:00:00Z",
+                "2026-07-20T00:00:00Z",
+                json.dumps(snapshot, ensure_ascii=False),
+            ),
+        )
+        connection.commit()
+
+    _upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        histories = connection.execute(
+            "select version, cash_balance, created_at, updated_at "
+            "from account_versions where account_id = ? order by version",
+            (account_id,),
+        ).fetchall()
+        replay_version = connection.execute(
+            "select resource_version from idempotency_records where key_hash = ?", ("c" * 64,)
+        ).fetchone()
+
+    assert histories == [(2, "2.000000", "2026-07-19T00:00:00Z", "2026-07-19T01:00:00Z")]
+    assert replay_version == (None,)
+
+
 def test_migrated_schema_matches_idempotency_and_account_history_orm_metadata(tmp_path: Path) -> None:
     path = tmp_path / "portfolio.db"
     _upgrade_database(path)

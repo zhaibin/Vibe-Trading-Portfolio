@@ -11,7 +11,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from vibe_portfolio.portfolio.database import Database
-from vibe_portfolio.portfolio.domain import Currency
+from vibe_portfolio.portfolio.domain import Currency, DomainValidationError, parse_money
 from vibe_portfolio.portfolio.repository import PortfolioRepository, ReplayUnavailable, RepositoryError
 from vibe_portfolio.portfolio.schemas import AccountCreate, AccountPatch, AccountView
 from vibe_portfolio.portfolio.tables import AccountRow, AccountVersionRow
@@ -53,21 +53,32 @@ def account_response(account: AccountRow) -> dict[str, object]:
 def account_version_response(account: AccountVersionRow) -> dict[str, object]:
     try:
         UUID(account.account_id)
+        cash_balance = None if account.cash_balance is None else parse_money(account.cash_balance)
+        created_at = _utc_timestamp(account.created_at)
+        updated_at = _utc_timestamp(account.updated_at)
+        archived_at = None if account.archived_at is None else _utc_timestamp(account.archived_at)
         view = AccountView.model_validate(
             {
                 "id": account.account_id,
                 "name": account.name,
                 "currency": account.currency,
-                "cash_balance": account.cash_balance,
+                "cash_balance": cash_balance,
                 "version": account.version,
-                "created_at": account.created_at,
-                "updated_at": account.updated_at,
-                "archived_at": account.archived_at,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "archived_at": archived_at,
             }
         )
-    except (TypeError, ValueError, ValidationError) as error:
+    except (DomainValidationError, TypeError, ValueError, ValidationError) as error:
         raise ReplayUnavailable() from error
     return view.model_dump(mode="json")
+
+
+def _utc_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("stored timestamp is not timezone-aware")
+    return parsed.astimezone(UTC)
 
 
 class PortfolioService:

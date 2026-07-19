@@ -396,3 +396,33 @@ async def test_replay_with_malformed_history_is_validated_and_sanitized(database
     assert replay.status_code == 503
     assert replay.json() == {"error": {"code": "PORTFOLIO_UNAVAILABLE"}}
     assert "private-malformed-value" not in replay.text
+
+
+@pytest.mark.parametrize(
+    ("column", "stored_value"),
+    [
+        ("cash_balance", "-1"),
+        ("cash_balance", "1.0000001"),
+        ("created_at", "2026-07-19T00:00:00"),
+        ("updated_at", "2026-07-19T00:00:00"),
+    ],
+    ids=["negative-money", "overprecision-money", "naive-created-at", "naive-updated-at"],
+)
+async def test_replay_rejects_parseable_invalid_money_and_naive_timestamps(
+    database: Database, column: str, stored_value: str
+) -> None:
+    body = {"name": "可解析但无效的历史", "currency": "CNY", "cash_balance": "1"}
+    key = f"invalid-history-{column}-{stored_value}"
+    created = await request(app_for(database), body, key)
+    async with database.session() as session, session.begin():
+        await session.execute(
+            update(AccountVersionRow)
+            .where(AccountVersionRow.account_id == created.json()["id"])
+            .values({column: stored_value})
+        )
+
+    replay = await request(app_for(database), body, key)
+
+    assert created.status_code == 201
+    assert replay.status_code == 503
+    assert replay.json() == {"error": {"code": "PORTFOLIO_UNAVAILABLE"}}
