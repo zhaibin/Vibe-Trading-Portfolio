@@ -142,9 +142,9 @@ def _migrations_directory() -> Path:
     return path
 
 
-def _configuration(path: Path, busy_timeout_ms: int) -> Config:
+def _configuration(path: Path, busy_timeout_ms: int, migrations_directory: Path | None = None) -> Config:
     config = Config()
-    config.set_main_option("script_location", str(_migrations_directory()))
+    config.set_main_option("script_location", str(migrations_directory or _migrations_directory()))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{path.absolute()}")
     config.attributes["portfolio_busy_timeout_ms"] = busy_timeout_ms
     return config
@@ -202,14 +202,16 @@ def _restore_backup(backup_path: Path, path: Path, busy_timeout_ms: int, origina
         raise DatabaseStartupError("DATABASE_MIGRATION_FAILED") from original_error
 
 
-def upgrade_database(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> DatabaseUpgradeResult:
+def _upgrade_database_with_resources(
+    path: Path, busy_timeout_ms: int, migrations_directory: Path
+) -> DatabaseUpgradeResult:
     """Verify and migrate *path*, retaining a verified backup before a schema change."""
     validate_database_path(path)
     existed = path.exists()
     _create_database_file(path)
     try:
         _integrity_check(path, busy_timeout_ms)
-        config = _configuration(path, busy_timeout_ms)
+        config = _configuration(path, busy_timeout_ms, migrations_directory)
         scripts = ScriptDirectory.from_config(config)
         head = scripts.get_current_head()
         if head is None:
@@ -252,6 +254,13 @@ def upgrade_database(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS)
     return DatabaseUpgradeResult(backup_path=backup_path, revision=head)
 
 
+def upgrade_database(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> DatabaseUpgradeResult:
+    """Run the complete migration while a packaged resource is materialized."""
+    migration_resource = resources.files("vibe_portfolio.portfolio").joinpath("migrations")
+    with resources.as_file(migration_resource) as migrations_directory:
+        return _upgrade_database_with_resources(path, busy_timeout_ms, migrations_directory)
+
+
 def sqlite_async_url(path: Path) -> str:
     return f"sqlite+aiosqlite:///{path.absolute()}"
 
@@ -279,7 +288,12 @@ class Database:
         await self.close()
         try:
             validate_database_path(self.path)
-            await asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms)
+            migration = asyncio.create_task(asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms))
+            try:
+                await asyncio.shield(migration)
+            except asyncio.CancelledError:
+                await asyncio.shield(migration)
+                raise
             self.engine = create_async_engine(
                 sqlite_async_url(self.path),
                 pool_pre_ping=True,
@@ -302,10 +316,16 @@ class Database:
             _raise_startup_or_busy(error, "DATABASE_STARTUP_FAILED")
 
     async def close(self) -> None:
-        if self.engine is not None:
-            await self.engine.dispose()
+        engine = self.engine
         self.engine = None
         self._sessions = None
+        if engine is not None:
+            disposal = asyncio.create_task(engine.dispose())
+            try:
+                await asyncio.shield(disposal)
+            except asyncio.CancelledError:
+                await asyncio.shield(disposal)
+                raise
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
