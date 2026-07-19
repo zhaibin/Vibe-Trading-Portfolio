@@ -13,7 +13,7 @@ CSP = (
     "connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
 PERMISSIONS_POLICY = "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
-_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _JSON_METHODS = frozenset({"POST", "PATCH"})
 _PROBE_PATH = "/api/v1/system/compatibility/mcp-probe"
 
@@ -48,24 +48,37 @@ class SecurityMiddleware:
         if headers.get("host") not in self.allowed_hosts:
             await self._respond(_error("HOST_FORBIDDEN", 400), scope, receive, send)
             return
-        if method in _WRITE_METHODS:
+        if method not in _SAFE_METHODS:
             if headers.get("origin") not in self.allowed_origins:
                 await self._respond(_error("ORIGIN_FORBIDDEN", 403), scope, receive, send)
                 return
             if headers.get("sec-fetch-site") not in {None, "same-origin"}:
                 await self._respond(_error("CROSS_SITE_FORBIDDEN", 403), scope, receive, send)
                 return
-            if method in _JSON_METHODS and path.startswith("/api/v1/") and path != _PROBE_PATH:
-                if _media_type(headers) != "application/json":
-                    await self._respond(_error("JSON_REQUIRED", 415), scope, receive, send)
-                    return
             messages = await self._bounded_body(receive)
             if messages is None:
                 await self._respond(_error("REQUEST_TOO_LARGE", 413), scope, receive, send)
                 return
+            has_body = any(
+                message["type"] == "http.request" and bool(message.get("body", b""))
+                for message in messages
+            )
+            requires_json = path.startswith("/api/v1/") and path != _PROBE_PATH and (
+                method in _JSON_METHODS or has_body
+            )
+            if requires_json and _media_type(headers) != "application/json":
+                await self._respond(_error("JSON_REQUIRED", 415), scope, receive, send)
+                return
             receive = self._replay(messages)
 
-        await self.app(scope, receive, self._send_with_headers(scope, send))
+        response_state = {"started": False}
+        hardened_send = self._send_with_headers(scope, send, response_state)
+        try:
+            await self.app(scope, receive, hardened_send)
+        except Exception:
+            if response_state["started"]:
+                raise
+            await _error("INTERNAL_ERROR", 500)(scope, receive, hardened_send)
 
     async def _bounded_body(self, receive: Receive) -> list[Message] | None:
         messages: list[Message] = []
@@ -92,16 +105,24 @@ class SecurityMiddleware:
 
         return receive
 
-    def _send_with_headers(self, scope: Scope, send: Send) -> Send:
+    def _send_with_headers(
+        self, scope: Scope, send: Send, response_state: dict[str, bool] | None = None
+    ) -> Send:
         async def hardened(message: Message) -> None:
             if message["type"] == "http.response.start":
+                if response_state is not None:
+                    response_state["started"] = True
                 headers = MutableHeaders(scope=message)
                 headers["Content-Security-Policy"] = CSP
                 headers["X-Content-Type-Options"] = "nosniff"
                 headers["Referrer-Policy"] = "no-referrer"
                 headers["Permissions-Policy"] = PERMISSIONS_POLICY
                 path = scope.get("path", "")
-                if path == "/api" or path.startswith("/api/"):
+                if (
+                    path == "/api"
+                    or path.startswith("/api/")
+                    or int(message["status"]) >= 400
+                ):
                     headers["Cache-Control"] = "no-store"
             await send(message)
 

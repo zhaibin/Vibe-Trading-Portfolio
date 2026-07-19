@@ -1,9 +1,9 @@
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, TypeVar, cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -40,6 +40,10 @@ class DiscoveryPort(Protocol):
 
 class McpProbePort(Protocol):
     async def run(self) -> McpProbeResult: ...
+
+
+T = TypeVar("T")
+ServiceFactory = Callable[[], "AppServices"]
 
 
 class ProbeError(BaseModel):
@@ -81,6 +85,27 @@ class AppServices:
     settings: Settings | None = None
 
 
+@dataclass(slots=True)
+class _ServiceSlot:
+    current: AppServices | None
+
+
+class _ServiceProxy:
+    def __init__(self, slot: _ServiceSlot, field: str) -> None:
+        self._slot = slot
+        self._field = field
+
+    def __getattr__(self, name: str) -> Any:
+        async def invoke(*args: object, **kwargs: object) -> object:
+            active = self._slot.current
+            service = None if active is None else getattr(active, self._field)
+            if service is None:
+                raise RuntimeError("application services are not running")
+            return await getattr(service, name)(*args, **kwargs)
+
+        return invoke
+
+
 def build_services(settings: Settings) -> AppServices:
     gateway = VibeGateway(settings)
     database = Database(settings.database_path, settings.database_busy_timeout_ms)
@@ -107,29 +132,95 @@ def build_services(settings: Settings) -> AppServices:
     )
 
 
-def create_app(services: AppServices | None = None) -> FastAPI:
-    configured = services or build_services(Settings())
-    settings = configured.settings or Settings()
+async def _wait_for_terminal(task: asyncio.Task[T]) -> T:
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+        except BaseException:
+            break
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def _run_to_terminal(awaitable: Coroutine[Any, Any, T]) -> T:
+    return await _wait_for_terminal(asyncio.create_task(awaitable))
+
+
+async def _close_services(services: AppServices) -> list[BaseException]:
+    errors: list[BaseException] = []
+    closers: list[Callable[[], Coroutine[Any, Any, None]]] = []
+    if services.market_data is not None:
+        closers.append(services.market_data.aclose)
+    if services.database is not None:
+        closers.append(services.database.close)
+    if services.gateway is not None:
+        closers.append(services.gateway.close)
+    for close in closers:
+        try:
+            await _run_to_terminal(close())
+        except BaseException as error:
+            errors.append(error)
+    return errors
+
+
+def _raise_lifecycle_errors(errors: list[BaseException]) -> None:
+    if not errors:
+        return
+    for error in errors:
+        if isinstance(error, asyncio.CancelledError):
+            raise error from None
+    if len(errors) == 1:
+        raise errors[0]
+    raise BaseExceptionGroup("application lifecycle failed", errors)
+
+
+def create_app(
+    services: AppServices | None = None,
+    *,
+    service_factory: ServiceFactory | None = None,
+    settings: Settings | None = None,
+) -> FastAPI:
+    if services is not None and service_factory is not None:
+        raise ValueError("provide services or service_factory, not both")
+    runtime_settings = settings or (None if services is None else services.settings) or Settings()
+    fixed_services = services
+    factory = service_factory or (lambda: build_services(runtime_settings))
+    service_slot = _ServiceSlot(fixed_services)
+    factory_mode = services is None
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        active = factory() if factory_mode else fixed_services
+        assert active is not None
+        service_slot.current = active
+        app.state.services = active
+        app.state.mcp_status = McpStatus.NOT_CHECKED
+        app.state._mcp_probe_lock = asyncio.Lock()
+        errors: list[BaseException] = []
         try:
-            if configured.database is not None:
-                await configured.database.start()
-            if configured.market_data is not None and configured.database is not None:
-                await configured.market_data.startup()
+            if active.database is not None:
+                await active.database.start()
+            if active.market_data is not None and active.database is not None:
+                await active.market_data.startup()
             yield
-        finally:
-            try:
-                if configured.market_data is not None:
-                    await configured.market_data.aclose()
-            finally:
-                try:
-                    if configured.database is not None:
-                        await configured.database.close()
-                finally:
-                    if configured.gateway is not None:
-                        await configured.gateway.close()
+        except BaseException as error:
+            errors.append(error)
+        errors.extend(await _close_services(active))
+        if factory_mode:
+            service_slot.current = None
+            app.state.services = None
+        _raise_lifecycle_errors(errors)
 
     app = FastAPI(
         title="Vibe-Trading Portfolio",
@@ -141,11 +232,11 @@ def create_app(services: AppServices | None = None) -> FastAPI:
     )
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=[settings.api_host, "localhost"],
+        allowed_hosts=[runtime_settings.api_host, "localhost"],
         www_redirect=False,
     )
-    app.add_middleware(SecurityMiddleware, settings=settings)
-    app.state.services = configured
+    app.add_middleware(SecurityMiddleware, settings=runtime_settings)
+    app.state.services = fixed_services
     app.state.mcp_status = McpStatus.NOT_CHECKED
     app.state._mcp_probe_lock = asyncio.Lock()
 
@@ -199,11 +290,23 @@ def create_app(services: AppServices | None = None) -> FastAPI:
             request.app.state.mcp_status = result.status
             return {"probe": result, "compatibility": report}
 
-    if configured.portfolio is not None:
-        app.include_router(build_portfolio_router(configured.portfolio))
-    if configured.market_data is not None:
-        app.include_router(build_market_data_router(configured.market_data))
-    if configured.static_dir is not None:
-        app.mount("/", SpaStaticApp(configured.static_dir), name="portfolio-web")
+    portfolio: PortfolioService | None
+    market_data: MarketDataService | None
+    static_dir: Path | None
+    if factory_mode:
+        portfolio = cast(PortfolioService, _ServiceProxy(service_slot, "portfolio"))
+        market_data = cast(MarketDataService, _ServiceProxy(service_slot, "market_data"))
+        static_dir = web_dist_path()
+    else:
+        assert fixed_services is not None
+        portfolio = fixed_services.portfolio
+        market_data = fixed_services.market_data
+        static_dir = fixed_services.static_dir
+    if portfolio is not None:
+        app.include_router(build_portfolio_router(portfolio))
+    if market_data is not None:
+        app.include_router(build_market_data_router(market_data))
+    if static_dir is not None:
+        app.mount("/", SpaStaticApp(static_dir), name="portfolio-web")
 
     return app

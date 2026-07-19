@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from typing import cast
 from uuid import UUID
@@ -168,6 +169,69 @@ def test_security_headers_and_api_no_store_apply_without_cors() -> None:
     assert "access-control-allow-origin" not in response.headers
 
 
+def assert_hardened_error(response: httpx.Response, *, cache_control: str = "no-store") -> None:
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "INTERNAL_ERROR"}}
+    assert "must-not-leak" not in response.text
+    assert response.headers["Content-Security-Policy"] == CSP
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Permissions-Policy"] == "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+    assert response.headers["Cache-Control"] == cache_control
+
+
+def test_unhandled_api_exception_is_sanitized_inside_response_policy() -> None:
+    app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=FakeProbe()))
+
+    @app.get("/api/v1/failure")
+    async def failure() -> None:
+        raise RuntimeError("broker_token=must-not-leak")
+
+    with TestClient(app, base_url=BASE_URL, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/failure")
+
+    assert_hardened_error(response)
+
+
+@pytest.mark.parametrize("method", ["TRACE", "CONNECT", "BREW"])
+def test_unknown_unsafe_methods_require_origin_fetch_metadata_and_body_bound(method: str) -> None:
+    app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=FakeProbe()))
+    with TestClient(app, base_url=BASE_URL) as client:
+        missing_origin = client.request(method, "/api/v1/system/status")
+        cross_site = client.request(
+            method,
+            "/api/v1/system/status",
+            headers={"Origin": BASE_URL, "Sec-Fetch-Site": "cross-site"},
+        )
+        admitted = client.request(
+            method,
+            "/api/v1/system/status",
+            headers={"Origin": BASE_URL, "Sec-Fetch-Site": "same-origin"},
+        )
+        wrong_type = client.request(
+            method,
+            "/api/v1/system/status",
+            content=b"{}",
+            headers={"Origin": BASE_URL, "Sec-Fetch-Site": "same-origin"},
+        )
+        oversized = client.request(
+            method,
+            "/api/v1/system/status",
+            content=b"x" * 64_001,
+            headers={"Origin": BASE_URL, "Sec-Fetch-Site": "same-origin"},
+        )
+
+    assert missing_origin.status_code == 403
+    assert missing_origin.json() == {"error": {"code": "ORIGIN_FORBIDDEN"}}
+    assert cross_site.status_code == 403
+    assert cross_site.json() == {"error": {"code": "CROSS_SITE_FORBIDDEN"}}
+    assert admitted.status_code == 405
+    assert wrong_type.status_code == 415
+    assert wrong_type.json() == {"error": {"code": "JSON_REQUIRED"}}
+    assert oversized.status_code == 413
+    assert oversized.json() == {"error": {"code": "REQUEST_TOO_LARGE"}}
+
+
 def test_lifespan_starts_and_closes_independent_services_without_regressing_gateway() -> None:
     events: list[str] = []
 
@@ -206,6 +270,235 @@ def test_lifespan_starts_and_closes_independent_services_without_regressing_gate
         "database:start",
         "market:start",
         "market:close",
+        "database:close",
+        "gateway:close",
+    ]
+
+
+def test_default_lifespan_builds_fresh_functional_services_for_every_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe_portfolio.api import app as app_module
+
+    events: list[str] = []
+    generations = 0
+
+    class GenerationDiscovery(FakeDiscovery):
+        def __init__(self, generation: int) -> None:
+            self.generation = generation
+
+        async def discover(self, mcp_status: McpStatus = McpStatus.NOT_CHECKED) -> CompatibilityReport:
+            report = await super().discover(mcp_status)
+            return report.model_copy(update={"reasons": [f"generation-{self.generation}"]})
+
+    class Lifecycle:
+        def __init__(self, generation: int, name: str) -> None:
+            self.generation = generation
+            self.name = name
+
+        async def start(self) -> None:
+            events.append(f"{self.generation}:{self.name}:start")
+
+        async def startup(self) -> None:
+            events.append(f"{self.generation}:{self.name}:start")
+
+        async def close(self) -> None:
+            events.append(f"{self.generation}:{self.name}:close")
+
+        async def aclose(self) -> None:
+            events.append(f"{self.generation}:{self.name}:close")
+
+    def factory(_: object) -> AppServices:
+        nonlocal generations
+        generations += 1
+        generation = generations
+        return AppServices(
+            discovery=GenerationDiscovery(generation),
+            mcp_probe=FakeProbe(),
+            gateway=cast(object, Lifecycle(generation, "gateway")),
+            database=cast(object, Lifecycle(generation, "database")),
+            market_data=cast(object, Lifecycle(generation, "market")),
+        )
+
+    monkeypatch.setattr(app_module, "build_services", factory)
+    app = create_app()
+    observed: list[str] = []
+    for _ in range(2):
+        with TestClient(app, base_url=BASE_URL) as client:
+            response = client.get("/api/v1/system/compatibility")
+            observed.append(response.json()["reasons"][0])
+
+    assert observed == ["generation-1", "generation-2"]
+    assert events == [
+        "1:database:start",
+        "1:market:start",
+        "1:market:close",
+        "1:database:close",
+        "1:gateway:close",
+        "2:database:start",
+        "2:market:start",
+        "2:market:close",
+        "2:database:close",
+        "2:gateway:close",
+    ]
+
+
+def test_partial_startup_failure_closes_constructed_services_in_order() -> None:
+    events: list[str] = []
+
+    class DatabaseLifecycle:
+        async def start(self) -> None:
+            events.append("database:start")
+
+        async def close(self) -> None:
+            events.append("database:close")
+
+    class MarketLifecycle:
+        async def startup(self) -> None:
+            events.append("market:start")
+            raise RuntimeError("startup-must-not-leak")
+
+        async def aclose(self) -> None:
+            events.append("market:close")
+
+    class GatewayLifecycle:
+        async def close(self) -> None:
+            events.append("gateway:close")
+
+    def factory() -> AppServices:
+        return AppServices(
+            discovery=FakeDiscovery(),
+            mcp_probe=FakeProbe(),
+            gateway=cast(object, GatewayLifecycle()),
+            database=cast(object, DatabaseLifecycle()),
+            market_data=cast(object, MarketLifecycle()),
+        )
+
+    app = create_app(service_factory=factory)
+    with pytest.raises(RuntimeError, match="startup-must-not-leak"):
+        with TestClient(app, base_url=BASE_URL):
+            pass
+
+    assert events == [
+        "database:start",
+        "market:start",
+        "market:close",
+        "database:close",
+        "gateway:close",
+    ]
+
+
+def test_close_failures_do_not_skip_later_services_and_are_all_retrieved() -> None:
+    events: list[str] = []
+
+    class Lifecycle:
+        def __init__(self, name: str, *, failure: bool = False) -> None:
+            self.name = name
+            self.failure = failure
+
+        async def start(self) -> None:
+            events.append(f"{self.name}:start")
+
+        async def startup(self) -> None:
+            events.append(f"{self.name}:start")
+
+        async def close(self) -> None:
+            events.append(f"{self.name}:close")
+            if self.failure:
+                raise RuntimeError(f"{self.name}-failed")
+
+        async def aclose(self) -> None:
+            await self.close()
+
+    def factory() -> AppServices:
+        return AppServices(
+            discovery=FakeDiscovery(),
+            mcp_probe=FakeProbe(),
+            gateway=cast(object, Lifecycle("gateway", failure=True)),
+            database=cast(object, Lifecycle("database", failure=True)),
+            market_data=cast(object, Lifecycle("market", failure=True)),
+        )
+
+    app = create_app(service_factory=factory)
+    with pytest.raises(BaseExceptionGroup) as caught:
+        with TestClient(app, base_url=BASE_URL):
+            pass
+
+    assert events == [
+        "database:start",
+        "market:start",
+        "market:close",
+        "database:close",
+        "gateway:close",
+    ]
+    assert {str(error) for error in caught.value.exceptions} == {
+        "market-failed",
+        "database-failed",
+        "gateway-failed",
+    }
+
+
+async def test_repeated_cancellation_waits_for_every_close_and_preserves_first_cancel() -> None:
+    events: list[str] = []
+    entered = asyncio.Event()
+    started = asyncio.Event()
+    release_market = asyncio.Event()
+    body_wait = asyncio.Event()
+
+    class DatabaseLifecycle:
+        async def start(self) -> None:
+            events.append("database:start")
+
+        async def close(self) -> None:
+            events.append("database:close")
+
+    class MarketLifecycle:
+        async def startup(self) -> None:
+            events.append("market:start")
+            started.set()
+
+        async def aclose(self) -> None:
+            events.append("market:close:start")
+            entered.set()
+            await release_market.wait()
+            events.append("market:close:end")
+
+    class GatewayLifecycle:
+        async def close(self) -> None:
+            events.append("gateway:close")
+
+    app = create_app(
+        service_factory=lambda: AppServices(
+            discovery=FakeDiscovery(),
+            mcp_probe=FakeProbe(),
+            gateway=cast(object, GatewayLifecycle()),
+            database=cast(object, DatabaseLifecycle()),
+            market_data=cast(object, MarketLifecycle()),
+        )
+    )
+
+    async def run_lifespan() -> None:
+        async with app.router.lifespan_context(app):
+            await body_wait.wait()
+
+    task = asyncio.create_task(run_lifespan())
+    await started.wait()
+    task.cancel("first-cancel")
+    await entered.wait()
+    task.cancel("second-cancel")
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_market.set()
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await task
+
+    assert caught.value.args == ("first-cancel",)
+    assert events == [
+        "database:start",
+        "market:start",
+        "market:close:start",
+        "market:close:end",
         "database:close",
         "gateway:close",
     ]

@@ -41,7 +41,14 @@ def static_dir(tmp_path: Path) -> Path:
     assets.mkdir(parents=True)
     (root / "index.html").write_text("<!doctype html><title>Portfolio</title>", encoding="utf-8")
     (assets / "app-C0FFEE12.js").write_text("console.log('safe')", encoding="utf-8")
+    (assets / "portfolio-settings.js").write_text("console.log('ordinary')", encoding="utf-8")
     (assets / "logo.svg").write_text("<svg></svg>", encoding="utf-8")
+    manifest = root / ".vite/manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text(
+        json.dumps({"src/main.tsx": {"file": "assets/app-C0FFEE12.js", "isEntry": True}}),
+        encoding="utf-8",
+    )
     return root
 
 
@@ -69,10 +76,12 @@ def test_get_only_extensionless_spa_routes_serve_index(static_dir: Path, path: s
 def test_hashed_assets_are_immutable_but_unhashed_assets_are_not(static_dir: Path) -> None:
     with TestClient(static_app(static_dir), base_url=BASE_URL) as client:
         hashed = client.get("/assets/app-C0FFEE12.js")
+        ordinary_hyphenated = client.get("/assets/portfolio-settings.js")
         unhashed = client.get("/assets/logo.svg")
 
-    assert hashed.status_code == unhashed.status_code == 200
+    assert hashed.status_code == ordinary_hyphenated.status_code == unhashed.status_code == 200
     assert hashed.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert ordinary_hyphenated.headers["Cache-Control"] == "no-store"
     assert unhashed.headers["Cache-Control"] == "no-store"
 
 
@@ -89,6 +98,8 @@ def test_unknown_api_and_asset_like_paths_never_receive_spa_html(static_dir: Pat
     assert api_root.headers["content-type"].startswith("application/json")
     assert api_root.headers["Cache-Control"] == "no-store"
     assert unknown_api.headers["content-type"].startswith("application/json")
+    for response in (asset_root, unknown_api, missing_asset, dotted_fallback):
+        assert response.headers["Cache-Control"] == "no-store"
     assert unknown_api.json() == {"detail": "Not Found"}
     assert "Portfolio" not in missing_asset.text
     assert "Portfolio" not in dotted_fallback.text
@@ -102,6 +113,8 @@ def test_non_get_requests_do_not_enter_spa_or_asset_fallback(static_dir: Path) -
 
     assert client_route.status_code == 405
     assert asset.status_code == 404
+    assert client_route.headers["Cache-Control"] == "no-store"
+    assert asset.headers["Cache-Control"] == "no-store"
 
 
 @pytest.mark.parametrize(
@@ -118,6 +131,44 @@ def test_traversal_like_asset_paths_are_rejected(static_dir: Path, path: str) ->
 
     assert response.status_code == 404
     assert "Portfolio" not in response.text
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_symlinked_asset_outside_root_is_rejected_without_cache(static_dir: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.js"
+    outside.write_text("must not be served", encoding="utf-8")
+    (static_dir / "assets/linked.js").symlink_to(outside)
+
+    with TestClient(static_app(static_dir), base_url=BASE_URL) as client:
+        response = client.get("/assets/linked.js")
+
+    assert response.status_code == 404
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "must not be served" not in response.text
+
+
+def test_unhandled_spa_exception_is_sanitized_with_security_and_no_store(
+    static_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibe_portfolio.api import static as static_module
+
+    async def failure(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("portfolio_note=must-not-leak")
+
+    monkeypatch.setattr(static_module.SpaStaticApp, "__call__", failure)
+    with TestClient(
+        static_app(static_dir), base_url=BASE_URL, raise_server_exceptions=False
+    ) as client:
+        response = client.get("/holdings")
+
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "INTERNAL_ERROR"}}
+    assert "must-not-leak" not in response.text
+    assert response.headers["Content-Security-Policy"]
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Permissions-Policy"]
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_web_dist_path_is_package_relative(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
