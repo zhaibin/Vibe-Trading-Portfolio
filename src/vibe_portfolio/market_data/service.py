@@ -331,6 +331,10 @@ class MarketDataService:
             await self._repository.recover_expired_refreshes(session, now)
             await self._repository.prune_expired(session, now)
 
+    async def aclose(self) -> None:
+        if self._registry is not None:
+            await self._registry.aclose()
+
     async def search(self, query: str, limit: int) -> list[InstrumentCandidate]:
         normalized_query, validated_limit = _normalize_query(query), _validate_limit(limit)
         tasks: list[asyncio.Task[tuple[list[InstrumentCandidate] | None, Exception | None]]] = []

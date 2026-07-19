@@ -2,12 +2,16 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from vibe_portfolio.api.security import SecurityMiddleware
+from vibe_portfolio.api.static import SpaStaticApp
 from vibe_portfolio.compatibility import (
     AnalysisMode,
     CompatibilityDiscovery,
@@ -16,9 +20,18 @@ from vibe_portfolio.compatibility import (
     McpStatus,
 )
 from vibe_portfolio.config import Settings
+from vibe_portfolio.market_data.router import build_market_data_router
+from vibe_portfolio.market_data.service import (
+    MarketDataService,
+    build_live_provider_registry,
+)
+from vibe_portfolio.portfolio.database import Database
+from vibe_portfolio.portfolio.router import build_portfolio_router
+from vibe_portfolio.portfolio.service import PortfolioService
 from vibe_portfolio.vibe.gateway import VibeGateway
 from vibe_portfolio.vibe.mcp_probe import McpProbeResult, PortfolioMcpProbe
 from vibe_portfolio.vibe.watcher import AttemptWatcher
+from vibe_portfolio.web import web_dist_path
 
 
 class DiscoveryPort(Protocol):
@@ -61,10 +74,22 @@ class AppServices:
     discovery: DiscoveryPort
     mcp_probe: McpProbePort
     gateway: VibeGateway | None = None
+    database: Database | None = None
+    portfolio: PortfolioService | None = None
+    market_data: MarketDataService | None = None
+    static_dir: Path | None = None
+    settings: Settings | None = None
 
 
 def build_services(settings: Settings) -> AppServices:
     gateway = VibeGateway(settings)
+    database = Database(settings.database_path, settings.database_busy_timeout_ms)
+    portfolio = PortfolioService(database)
+    market_data = MarketDataService(
+        database,
+        build_live_provider_registry(settings),
+        settings=settings,
+    )
     watcher = AttemptWatcher(
         gateway,
         poll_interval_seconds=settings.vibe_poll_interval_seconds,
@@ -74,19 +99,37 @@ def build_services(settings: Settings) -> AppServices:
         discovery=CompatibilityDiscovery(gateway),
         mcp_probe=PortfolioMcpProbe(gateway, watcher),
         gateway=gateway,
+        database=database,
+        portfolio=portfolio,
+        market_data=market_data,
+        static_dir=web_dist_path(),
+        settings=settings,
     )
 
 
 def create_app(services: AppServices | None = None) -> FastAPI:
     configured = services or build_services(Settings())
+    settings = configured.settings or Settings()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
+            if configured.database is not None:
+                await configured.database.start()
+            if configured.market_data is not None and configured.database is not None:
+                await configured.market_data.startup()
             yield
         finally:
-            if configured.gateway is not None:
-                await configured.gateway.close()
+            try:
+                if configured.market_data is not None:
+                    await configured.market_data.aclose()
+            finally:
+                try:
+                    if configured.database is not None:
+                        await configured.database.close()
+                finally:
+                    if configured.gateway is not None:
+                        await configured.gateway.close()
 
     app = FastAPI(
         title="Vibe-Trading Portfolio",
@@ -94,8 +137,14 @@ def create_app(services: AppServices | None = None) -> FastAPI:
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
-        openapi_url=None,
+        openapi_url="/api/v1/openapi.json",
     )
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=[settings.api_host, "localhost"],
+        www_redirect=False,
+    )
+    app.add_middleware(SecurityMiddleware, settings=settings)
     app.state.services = configured
     app.state.mcp_status = McpStatus.NOT_CHECKED
     app.state._mcp_probe_lock = asyncio.Lock()
@@ -149,5 +198,12 @@ def create_app(services: AppServices | None = None) -> FastAPI:
 
             request.app.state.mcp_status = result.status
             return {"probe": result, "compatibility": report}
+
+    if configured.portfolio is not None:
+        app.include_router(build_portfolio_router(configured.portfolio))
+    if configured.market_data is not None:
+        app.include_router(build_market_data_router(configured.market_data))
+    if configured.static_dir is not None:
+        app.mount("/", SpaStaticApp(configured.static_dir), name="portfolio-web")
 
     return app

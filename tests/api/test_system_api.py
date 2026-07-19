@@ -1,11 +1,18 @@
 import asyncio
+from typing import cast
 
 import httpx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from vibe_portfolio.api.app import AppServices, create_app
 from vibe_portfolio.compatibility import AnalysisMode, CompatibilityReport, CompatibilityState, McpStatus
+from vibe_portfolio.market_data.service import MarketDataService
+from vibe_portfolio.portfolio.service import PortfolioService
 from vibe_portfolio.vibe.mcp_probe import McpProbeResult
+
+BASE_URL = "http://127.0.0.1:8765"
+WRITE_HEADERS = {"Origin": BASE_URL}
 
 
 class FakeDiscovery:
@@ -89,12 +96,33 @@ class OrderedProbe:
             self.active -= 1
 
 
+def system_operations(document: dict[str, object]) -> set[tuple[str, str]]:
+    paths = cast(dict[str, dict[str, object]], document["paths"])
+    return {
+        (path, method)
+        for path, item in paths.items()
+        if path.startswith("/api/v1/system/")
+        for method in item
+    }
+
+
+def create_full_test_app() -> FastAPI:
+    return create_app(
+        AppServices(
+            discovery=FakeDiscovery(),
+            mcp_probe=FakeProbe(),
+            portfolio=cast(PortfolioService, object()),
+            market_data=cast(MarketDataService, object()),
+        )
+    )
+
+
 def test_get_compatibility_is_read_only_and_does_not_run_mcp_probe() -> None:
     discovery = FakeDiscovery()
     probe = FakeProbe()
     app = create_app(AppServices(discovery=discovery, mcp_probe=probe))
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url=BASE_URL) as client:
         response = client.get("/api/v1/system/compatibility")
 
     assert response.status_code == 200
@@ -109,9 +137,9 @@ def test_post_probe_is_explicit_and_updates_compatibility() -> None:
     probe = FakeProbe()
     app = create_app(AppServices(discovery=discovery, mcp_probe=probe))
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url=BASE_URL) as client:
         before = client.get("/api/v1/system/status")
-        result = client.post("/api/v1/system/compatibility/mcp-probe")
+        result = client.post("/api/v1/system/compatibility/mcp-probe", headers=WRITE_HEADERS)
         compatibility = client.get("/api/v1/system/compatibility")
         status = client.get("/api/v1/system/status")
 
@@ -128,15 +156,8 @@ def test_post_probe_is_explicit_and_updates_compatibility() -> None:
     assert probe.calls == 1
 
 
-def test_system_api_exposes_only_diagnostics_and_explicit_read_only_probe() -> None:
-    app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=FakeProbe()))
-
-    operations = {
-        (path, method)
-        for path, item in app.openapi()["paths"].items()
-        for method in item
-    }
-
+def test_system_operations_remain_exactly_the_approved_three() -> None:
+    operations = system_operations(create_full_test_app().openapi())
     assert operations == {
         ("/api/v1/system/status", "get"),
         ("/api/v1/system/compatibility", "get"),
@@ -144,14 +165,17 @@ def test_system_api_exposes_only_diagnostics_and_explicit_read_only_probe() -> N
     }
 
 
-def test_actual_fastapi_router_has_only_the_three_diagnostic_routes() -> None:
+def test_runtime_openapi_is_published_without_interactive_docs() -> None:
     app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=FakeProbe()))
 
-    assert [route.path for route in app.routes] == [
-        "/api/v1/system/status",
-        "/api/v1/system/compatibility",
-        "/api/v1/system/compatibility/mcp-probe",
-    ]
+    with TestClient(app, base_url=BASE_URL) as client:
+        document = client.get("/api/v1/openapi.json")
+        swagger = client.get("/docs")
+        redoc = client.get("/redoc")
+
+    assert document.status_code == 200
+    assert system_operations(document.json()) == system_operations(app.openapi())
+    assert swagger.status_code == redoc.status_code == 404
 
 
 async def test_probe_failure_immediately_invalidates_cached_availability_and_is_sanitized() -> None:
@@ -159,9 +183,11 @@ async def test_probe_failure_immediately_invalidates_cached_availability_and_is_
     app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=probe))
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as client:
-        first = await client.post("/api/v1/system/compatibility/mcp-probe")
-        failed_task = asyncio.create_task(client.post("/api/v1/system/compatibility/mcp-probe"))
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        first = await client.post("/api/v1/system/compatibility/mcp-probe", headers=WRITE_HEADERS)
+        failed_task = asyncio.create_task(
+            client.post("/api/v1/system/compatibility/mcp-probe", headers=WRITE_HEADERS)
+        )
         await probe.failure_entered.wait()
         while_running = await client.get("/api/v1/system/status")
         probe.release_failure.set()
@@ -186,10 +212,14 @@ async def test_concurrent_probe_requests_are_serialized_and_preserve_request_ord
     app = create_app(AppServices(discovery=FakeDiscovery(), mcp_probe=probe))
     transport = httpx.ASGITransport(app=app)
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as client:
-        first_task = asyncio.create_task(client.post("/api/v1/system/compatibility/mcp-probe"))
+    async with httpx.AsyncClient(transport=transport, base_url=BASE_URL) as client:
+        first_task = asyncio.create_task(
+            client.post("/api/v1/system/compatibility/mcp-probe", headers=WRITE_HEADERS)
+        )
         await probe.first_entered.wait()
-        second_task = asyncio.create_task(client.post("/api/v1/system/compatibility/mcp-probe"))
+        second_task = asyncio.create_task(
+            client.post("/api/v1/system/compatibility/mcp-probe", headers=WRITE_HEADERS)
+        )
         await asyncio.sleep(0.01)
         calls_before_first_completed = probe.calls
         probe.release_first.set()
@@ -208,8 +238,8 @@ def test_get_discovery_failure_invalidates_cached_availability_without_running_p
     probe = FakeProbe()
     app = create_app(AppServices(discovery=discovery, mcp_probe=probe))
 
-    with TestClient(app, raise_server_exceptions=False) as client:
-        available = client.post("/api/v1/system/compatibility/mcp-probe")
+    with TestClient(app, base_url=BASE_URL, raise_server_exceptions=False) as client:
+        available = client.post("/api/v1/system/compatibility/mcp-probe", headers=WRITE_HEADERS)
         discovery.fail = True
         failed = client.get("/api/v1/system/compatibility")
         status = client.get("/api/v1/system/status")
