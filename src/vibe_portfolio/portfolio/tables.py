@@ -108,9 +108,9 @@ class QuoteRefreshRunRow(Base):
     status: Mapped[str] = mapped_column(String(10), nullable=False)
     started_at: Mapped[datetime] = mapped_column(UtcIsoDateTime(), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(UtcIsoDateTime(), nullable=True)
-    updated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    stale_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    unavailable_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    stale_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    unavailable_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
 class LatestQuoteRow(Base):
