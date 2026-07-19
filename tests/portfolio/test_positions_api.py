@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -7,11 +8,15 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from vibe_portfolio.portfolio.database import Database, DatabaseBusyError, DatabaseStartupError
+from vibe_portfolio.portfolio.repository import IdempotencyClaim, PortfolioRepository, hash_idempotency_key
 from vibe_portfolio.portfolio.router import build_portfolio_router
+from vibe_portfolio.portfolio.schemas import PositionPatch
 from vibe_portfolio.portfolio.service import PortfolioService
-from vibe_portfolio.portfolio.tables import InstrumentCandidateRow
+from vibe_portfolio.portfolio.tables import IdempotencyRow, InstrumentCandidateRow, PositionRow, PositionVersionRow
 
 
 def write_headers(key: str) -> dict[str, str]:
@@ -24,8 +29,74 @@ def app_for_service(service: PortfolioService) -> FastAPI:
     return app
 
 
-def app_for(database: Database) -> FastAPI:
-    return app_for_service(PortfolioService(database))
+def app_for(database: Database, repository: PortfolioRepository | None = None) -> FastAPI:
+    return app_for_service(PortfolioService(database, repository))
+
+
+async def patch_for_app(
+    app: FastAPI, position_id: str, body: dict[str, object], key: str
+) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as app_client:
+        return await app_client.patch(
+            f"/api/v1/positions/{position_id}",
+            json=body,
+            headers=write_headers(key),
+        )
+
+
+class HoldingPositionRepository(PortfolioRepository):
+    def __init__(self, entered: asyncio.Event, release: asyncio.Event) -> None:
+        self.entered = entered
+        self.release = release
+
+    async def update_position(
+        self,
+        session: AsyncSession,
+        position_id: str,
+        command: PositionPatch,
+        note: str | None,
+        now: datetime,
+    ) -> PositionRow:
+        self.entered.set()
+        await self.release.wait()
+        return await super().update_position(session, position_id, command, note, now)
+
+
+class SignalingClaimRepository(PortfolioRepository):
+    def __init__(self, started: asyncio.Event) -> None:
+        self.started = started
+
+    async def claim_idempotency(
+        self,
+        session: AsyncSession,
+        scope: str,
+        key: str,
+        request_hash: str,
+        now: datetime,
+    ) -> IdempotencyClaim:
+        self.started.set()
+        return await super().claim_idempotency(session, scope, key, request_hash, now)
+
+
+class CompletionFailureRepository(PortfolioRepository):
+    async def complete_resource_idempotency(
+        self,
+        session: AsyncSession,
+        claim: IdempotencyClaim,
+        *,
+        resource_id: str,
+        resource_version: int,
+        status: int,
+    ) -> None:
+        await super().complete_resource_idempotency(
+            session,
+            claim,
+            resource_id=resource_id,
+            resource_version=resource_version,
+            status=status,
+        )
+        raise RuntimeError("forced completion failure")
 
 
 @pytest_asyncio.fixture
@@ -212,6 +283,32 @@ async def test_duplicate_active_position_is_a_stable_conflict(
     assert duplicate.json()["error"]["code"] == "DUPLICATE_POSITION"
 
 
+async def test_position_key_with_different_body_is_an_idempotency_conflict(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+
+    first = await create_position(
+        client,
+        account,
+        instrument,
+        key="position-body-conflict",
+        quantity="1",
+    )
+    conflict = await create_position(
+        client,
+        account,
+        instrument,
+        key="position-body-conflict",
+        quantity="2",
+    )
+
+    assert first.status_code == 201
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+
+
 async def test_archive_allows_recreate_but_restore_rejects_active_duplicate(
     client: httpx.AsyncClient, database: Database
 ) -> None:
@@ -236,6 +333,30 @@ async def test_archive_allows_recreate_but_restore_rejects_active_duplicate(
     assert restored.json()["error"]["code"] == "DUPLICATE_POSITION"
 
 
+async def test_archived_position_restores_when_no_active_duplicate_exists(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    created = await create_position(client, account, instrument, key="restore-success-create")
+    archived = await client.patch(
+        f"/api/v1/positions/{created.json()['id']}",
+        json={"version": 1, "archived": True},
+        headers=write_headers("restore-success-archive"),
+    )
+
+    restored = await client.patch(
+        f"/api/v1/positions/{created.json()['id']}",
+        json={"version": 2, "archived": False},
+        headers=write_headers("restore-success"),
+    )
+
+    assert archived.status_code == 200
+    assert restored.status_code == 200
+    assert restored.json()["version"] == 3
+    assert restored.json()["archived_at"] is None
+
+
 async def test_patch_uses_optimistic_concurrency(client: httpx.AsyncClient, database: Database) -> None:
     account = await create_account(client)
     instrument = await confirmed_instrument(client, database)
@@ -250,6 +371,39 @@ async def test_patch_uses_optimistic_concurrency(client: httpx.AsyncClient, data
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "CONCURRENT_MODIFICATION"
     assert response.json()["error"]["fields"] == {"version": 1}
+
+
+async def test_concurrent_position_patches_have_one_winner(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    created = await create_position(client, account, instrument, key="concurrent-patch-create")
+    position_id = str(created.json()["id"])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    second_started = asyncio.Event()
+    first_app = app_for(database, HoldingPositionRepository(entered, release))
+    second_app = app_for(database, SignalingClaimRepository(second_started))
+    first_task = asyncio.create_task(
+        patch_for_app(first_app, position_id, {"version": 1, "quantity": "2"}, "concurrent-patch-first")
+    )
+    await entered.wait()
+    second_task = asyncio.create_task(
+        patch_for_app(second_app, position_id, {"version": 1, "quantity": "3"}, "concurrent-patch-second")
+    )
+    await second_started.wait()
+    try:
+        await asyncio.sleep(0.05)
+        assert not second_task.done()
+    finally:
+        release.set()
+    first, second = await asyncio.gather(first_task, second_task)
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "CONCURRENT_MODIFICATION"
+    assert second.json()["error"]["fields"] == {"version": 2}
 
 
 async def test_notes_are_normalized_and_control_characters_or_long_values_are_rejected(
@@ -304,6 +458,25 @@ async def test_note_allows_plain_unicode_formatting_sequences(
     assert response.json()["note"] == "家庭 👩‍💻"
 
 
+@pytest.mark.parametrize("unsafe", ["\u202e", "\u2066", "\u2067", "\u2068", "\u2069"])
+async def test_note_rejects_bidi_format_controls(
+    client: httpx.AsyncClient, database: Database, unsafe: str
+) -> None:
+    account = await create_account(client, name=f"bidi-{ord(unsafe):x}")
+    instrument = await confirmed_instrument(client, database)
+
+    response = await create_position(
+        client,
+        account,
+        instrument,
+        key=f"bidi-position-note-{ord(unsafe):x}",
+        note=f"safe{unsafe}spoofed",
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 async def test_archived_account_rejects_new_position(client: httpx.AsyncClient, database: Database) -> None:
     account = await create_account(client)
     instrument = await confirmed_instrument(client, database)
@@ -350,18 +523,27 @@ async def test_active_and_archived_position_lists_are_cursor_paginated(
     )
     first = await create_position(client, account, first_instrument, key="page-position-first")
     second = await create_position(client, account, second_instrument, key="page-position-second")
+
+    first_page = await client.get("/api/v1/positions?limit=1")
+    second_page = await client.get(
+        f"/api/v1/positions?limit=1&cursor={first_page.json()['next_cursor']}"
+    )
     await client.patch(
         f"/api/v1/positions/{first.json()['id']}",
         json={"version": 1, "archived": True},
         headers=write_headers("page-archive-first"),
     )
 
-    active = await client.get("/api/v1/positions?limit=1")
     archived = await client.get("/api/v1/positions?archived=true&limit=1")
 
     assert second.status_code == 201
-    assert active.status_code == archived.status_code == 200
-    assert [item["id"] for item in active.json()["items"]] == [second.json()["id"]]
+    assert first_page.status_code == second_page.status_code == archived.status_code == 200
+    assert first_page.json()["next_cursor"]
+    assert second_page.json()["next_cursor"] is None
+    assert {
+        first_page.json()["items"][0]["id"],
+        second_page.json()["items"][0]["id"],
+    } == {first.json()["id"], second.json()["id"]}
     assert [item["id"] for item in archived.json()["items"]] == [first.json()["id"]]
 
 
@@ -393,6 +575,129 @@ async def test_patch_replay_returns_original_position_after_later_update_and_res
     assert first.status_code == replay.status_code == 200
     assert later.status_code == 200
     assert replay.json() == first.json()
+
+
+@pytest.mark.parametrize(
+    ("assignment", "value"),
+    [
+        ("note", "bad\u0000note"),
+        ("note", "Ａ股观察"),
+        ("created_at", "2030-07-19T00:00:00+00:00"),
+        ("updated_at", "2020-07-19T00:00:00+00:00"),
+    ],
+    ids=["nul-note", "nonnormal-note", "created-after-updated", "updated-before-created"],
+)
+async def test_position_replay_rejects_tampered_history(
+    client: httpx.AsyncClient,
+    database: Database,
+    assignment: str,
+    value: str,
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    key = f"tampered-position-history-{assignment}-{uuid4()}"
+    created = await create_position(client, account, instrument, key=key)
+    async with database.session() as session, session.begin():
+        await session.execute(
+            update(PositionVersionRow)
+            .where(PositionVersionRow.position_id == created.json()["id"], PositionVersionRow.version == 1)
+            .values({assignment: value})
+        )
+
+    replay = await create_position(client, account, instrument, key=key)
+
+    assert created.status_code == 201
+    assert replay.status_code == 503
+    assert replay.json() == {"error": {"code": "PORTFOLIO_UNAVAILABLE"}}
+    assert value not in replay.text
+
+
+@pytest.mark.parametrize(
+    ("assignment", "value"),
+    [
+        ("archived_at", "2020-07-19T00:00:00+00:00"),
+        ("updated_at", "2030-07-19T00:00:00+00:00"),
+    ],
+    ids=["archive-before-created", "updated-after-archive"],
+)
+async def test_archived_position_replay_rejects_reversed_timestamps(
+    client: httpx.AsyncClient,
+    database: Database,
+    assignment: str,
+    value: str,
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    created = await create_position(client, account, instrument, key=f"archive-tamper-create-{uuid4()}")
+    key = f"archive-tamper-patch-{uuid4()}"
+    archived = await client.patch(
+        f"/api/v1/positions/{created.json()['id']}",
+        json={"version": 1, "archived": True},
+        headers=write_headers(key),
+    )
+    async with database.session() as session, session.begin():
+        await session.execute(
+            update(PositionVersionRow)
+            .where(PositionVersionRow.position_id == created.json()["id"], PositionVersionRow.version == 2)
+            .values({assignment: value})
+        )
+
+    replay = await client.patch(
+        f"/api/v1/positions/{created.json()['id']}",
+        json={"version": 1, "archived": True},
+        headers=write_headers(key),
+    )
+
+    assert archived.status_code == 200
+    assert replay.status_code == 503
+    assert replay.json() == {"error": {"code": "PORTFOLIO_UNAVAILABLE"}}
+
+
+async def test_position_replay_rejects_tampered_resource_version(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    key = "tampered-position-version"
+    created = await create_position(client, account, instrument, key=key)
+    async with database.session() as session, session.begin():
+        await session.execute(
+            update(IdempotencyRow)
+            .where(IdempotencyRow.key_hash == hash_idempotency_key(key))
+            .values(resource_version=0)
+        )
+
+    replay = await create_position(client, account, instrument, key=key)
+
+    assert created.status_code == 201
+    assert replay.status_code == 503
+    assert replay.json() == {"error": {"code": "PORTFOLIO_UNAVAILABLE"}}
+
+
+async def test_position_completion_failure_rolls_back_position_history_and_claim(
+    client: httpx.AsyncClient, database: Database
+) -> None:
+    account = await create_account(client)
+    instrument = await confirmed_instrument(client, database)
+    key = "position-completion-failure"
+    transport = httpx.ASGITransport(
+        app=app_for(database, CompletionFailureRepository()),
+        raise_app_exceptions=False,
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://sidecar") as failing_client:
+        response = await create_position(failing_client, account, instrument, key=key)
+    async with database.session() as session:
+        position_count = await session.scalar(select(func.count()).select_from(PositionRow))
+        history_count = await session.scalar(select(func.count()).select_from(PositionVersionRow))
+        claim = await session.get(
+            IdempotencyRow,
+            ("POST:/api/v1/positions", hash_idempotency_key(key)),
+        )
+
+    assert response.status_code == 500
+    assert position_count == 0
+    assert history_count == 0
+    assert claim is None
 
 
 @pytest.mark.parametrize(

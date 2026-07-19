@@ -306,6 +306,80 @@ def test_privacy_migration_skips_parseable_invalid_completed_snapshot(
     assert replay_version == (None,)
 
 
+def test_position_history_migration_backfills_existing_position(tmp_path: Path) -> None:
+    path = tmp_path / "portfolio.db"
+    _upgrade_database(path, "20260719_0003")
+    account_id = "33333333-3333-4333-8333-333333333333"
+    instrument_id = "44444444-4444-4444-8444-444444444444"
+    position_id = "55555555-5555-4555-8555-555555555555"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "insert into accounts values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                account_id,
+                "迁移账户",
+                "迁移账户",
+                "CNY",
+                "1.000000",
+                1,
+                "2026-07-19T00:00:00+00:00",
+                "2026-07-19T00:00:00+00:00",
+                None,
+            ),
+        )
+        connection.execute(
+            "insert into instruments values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                instrument_id,
+                "600519.SH",
+                "迁移证券",
+                "CN_SH",
+                "CNY",
+                "equity",
+                "2026-07-19T00:00:00+00:00",
+                "2026-07-19T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            "insert into positions values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                position_id,
+                account_id,
+                instrument_id,
+                "10.00000000",
+                "12.340000",
+                "迁移备注",
+                3,
+                "2026-07-19T00:00:00+00:00",
+                "2026-07-19T01:00:00+00:00",
+                None,
+            ),
+        )
+        connection.commit()
+
+    _upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        history = connection.execute(
+            "select position_id, version, account_id, instrument_id, quantity, average_cost, note, "
+            "created_at, updated_at, archived_at from position_versions where position_id = ?",
+            (position_id,),
+        ).fetchone()
+
+    assert history == (
+        position_id,
+        3,
+        account_id,
+        instrument_id,
+        "10.00000000",
+        "12.340000",
+        "迁移备注",
+        "2026-07-19T00:00:00+00:00",
+        "2026-07-19T01:00:00+00:00",
+        None,
+    )
+
+
 def test_migrated_schema_matches_idempotency_and_account_history_orm_metadata(tmp_path: Path) -> None:
     path = tmp_path / "portfolio.db"
     _upgrade_database(path)

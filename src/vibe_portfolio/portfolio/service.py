@@ -21,6 +21,7 @@ from vibe_portfolio.portfolio.domain import (
     parse_quantity,
 )
 from vibe_portfolio.portfolio.repository import (
+    CANDIDATE_TTL,
     InstrumentNotConfirmed,
     PortfolioRepository,
     ReplayUnavailable,
@@ -136,6 +137,16 @@ def position_version_response(position: PositionVersionRow) -> dict[str, object]
         UUID(position.position_id)
         UUID(position.account_id)
         UUID(position.instrument_id)
+        note = normalize_note(position.note)
+        if note != position.note:
+            raise ValueError("stored note is not canonical")
+        created_at = _utc_timestamp(position.created_at)
+        updated_at = _utc_timestamp(position.updated_at)
+        archived_at = None if position.archived_at is None else _utc_timestamp(position.archived_at)
+        if created_at > updated_at or (
+            archived_at is not None and (created_at > archived_at or updated_at > archived_at)
+        ):
+            raise ValueError("stored timestamps are not chronological")
         view = PositionView.model_validate(
             {
                 "id": position.position_id,
@@ -143,14 +154,14 @@ def position_version_response(position: PositionVersionRow) -> dict[str, object]
                 "instrument_id": position.instrument_id,
                 "quantity": parse_quantity(position.quantity),
                 "average_cost": parse_money(position.average_cost),
-                "note": position.note,
+                "note": note,
                 "version": position.version,
-                "created_at": _utc_timestamp(position.created_at),
-                "updated_at": _utc_timestamp(position.updated_at),
-                "archived_at": None if position.archived_at is None else _utc_timestamp(position.archived_at),
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "archived_at": archived_at,
             }
         )
-    except (DomainValidationError, TypeError, ValueError, ValidationError) as error:
+    except (DomainValidationError, RepositoryError, TypeError, ValueError, ValidationError) as error:
         raise ReplayUnavailable() from error
     return view.model_dump(mode="json")
 
@@ -166,15 +177,23 @@ def normalize_note(value: str | None) -> str | None:
     if value is None:
         return None
     normalized = unicodedata.normalize("NFKC", value)
-    if len(normalized) > 500 or any(
-        unicodedata.category(character) in {"Cc", "Cs"} for character in normalized
-    ):
+    if len(normalized) > 500 or any(_unsafe_note_character(character) for character in normalized):
         raise RepositoryError("VALIDATION_ERROR", fields={"note": "invalid"})
     return normalized
 
 
-def _candidate_identity(candidate: InstrumentCandidateRow) -> list[tuple[str, str]]:
+def _unsafe_note_character(character: str) -> bool:
+    category = unicodedata.category(character)
+    return category in {"Cc", "Cs"} or (category == "Cf" and character != "\u200d")
+
+
+def _candidate_identity(candidate: InstrumentCandidateRow, now: datetime) -> list[tuple[str, str]]:
     try:
+        if not (
+            candidate.created_at <= now < candidate.expires_at
+            and candidate.expires_at <= candidate.created_at + CANDIDATE_TTL
+        ):
+            raise ValueError("candidate lifetime invalid")
         market = Market(candidate.market)
         currency = Currency(candidate.currency)
         AssetType(candidate.asset_type)
@@ -248,7 +267,7 @@ class PortfolioService:
             candidate = await self.repository.candidate(session, candidate_id, now)
             if candidate is None:
                 raise InstrumentNotConfirmed()
-            mappings = _candidate_identity(candidate)
+            mappings = _candidate_identity(candidate, now)
             instrument = await self.repository.upsert_instrument(session, candidate, mappings, now)
             await self.repository.consume_candidate(session, candidate_id, now)
             await self.repository.complete_resource_idempotency(

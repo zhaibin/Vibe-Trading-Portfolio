@@ -25,6 +25,7 @@ from vibe_portfolio.portfolio.tables import (
 )
 
 IDEMPOTENCY_TTL: Final = timedelta(hours=24)
+CANDIDATE_TTL: Final = timedelta(minutes=15)
 
 
 class RepositoryError(RuntimeError):
@@ -113,6 +114,16 @@ class CandidateInput(Protocol):
     currency: object
     asset_type: object
     provider_symbols: Sequence[ProviderSymbolInput]
+
+
+def _valid_candidate_lifetime(candidate: InstrumentCandidateRow, now: datetime) -> bool:
+    try:
+        return (
+            candidate.created_at <= now < candidate.expires_at
+            and candidate.expires_at <= candidate.created_at + CANDIDATE_TTL
+        )
+    except TypeError:
+        return False
 
 
 class PortfolioRepository:
@@ -239,8 +250,7 @@ class PortfolioRepository:
         session: AsyncSession,
         candidates: Sequence[CandidateInput],
         *,
-        created_at: datetime,
-        expires_at: datetime,
+        now: datetime,
     ) -> list[InstrumentCandidateRow]:
         rows: list[InstrumentCandidateRow] = []
         for candidate in candidates:
@@ -259,8 +269,8 @@ class PortfolioRepository:
                 asset_type=str(getattr(candidate.asset_type, "value", candidate.asset_type)),
                 provider=mappings[0]["provider"],
                 provider_symbols_json=json.dumps(mappings, sort_keys=True, separators=(",", ":")),
-                created_at=created_at,
-                expires_at=expires_at,
+                created_at=now,
+                expires_at=now + CANDIDATE_TTL,
                 consumed_at=None,
             )
             session.add(row)
@@ -274,10 +284,12 @@ class PortfolioRepository:
         statement: Select[tuple[InstrumentCandidateRow]] = select(InstrumentCandidateRow).where(
             InstrumentCandidateRow.id == candidate_id,
             InstrumentCandidateRow.consumed_at.is_(None),
-            InstrumentCandidateRow.expires_at > now,
         )
         result = await session.execute(statement)
-        return result.scalar_one_or_none()
+        candidate = result.scalar_one_or_none()
+        if candidate is None or not _valid_candidate_lifetime(candidate, now):
+            return None
+        return candidate
 
     async def consume_candidate(
         self, session: AsyncSession, candidate_id: str, now: datetime
@@ -287,6 +299,7 @@ class PortfolioRepository:
             .where(
                 InstrumentCandidateRow.id == candidate_id,
                 InstrumentCandidateRow.consumed_at.is_(None),
+                InstrumentCandidateRow.created_at <= now,
                 InstrumentCandidateRow.expires_at > now,
             )
             .values(consumed_at=now)
