@@ -1,13 +1,27 @@
+import asyncio
 import sqlite3
+import threading
 import time
+import zipfile
 from contextlib import closing
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import text
 
 from vibe_portfolio.portfolio import database as database_module
-from vibe_portfolio.portfolio.database import Database, DatabaseBusyError, DatabaseStartupError, upgrade_database
+from vibe_portfolio.portfolio.database import (
+    Database,
+    DatabaseBusyError,
+    DatabaseStartupError,
+    _configuration,
+    _wait_for_terminal,
+    sqlite_async_url,
+    upgrade_database,
+)
+
+MIGRATION_DIRECTORY = Path("src/vibe_portfolio/portfolio/migrations").absolute()
 
 
 def sqlite_integrity(path: Path) -> str:
@@ -22,6 +36,328 @@ def legacy_database_fixture(tmp_path: Path) -> Path:
         connection.execute("INSERT INTO legacy_records VALUES (1)")
         connection.commit()
     return path
+
+
+class ControlledEngine:
+    def __init__(self, *, dispose_error: BaseException | None = None) -> None:
+        self.dispose_started = asyncio.Event()
+        self.dispose_release = asyncio.Event()
+        self.dispose_finished = False
+        self.dispose_error = dispose_error
+
+    async def dispose(self) -> None:
+        self.dispose_started.set()
+        try:
+            await self.dispose_release.wait()
+            if self.dispose_error is not None:
+                raise self.dispose_error
+        finally:
+            self.dispose_finished = True
+
+
+@pytest.mark.asyncio
+async def test_terminal_wait_preserves_first_cancellation_until_failure_is_terminal() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = False
+
+    async def fail_after_release() -> None:
+        nonlocal finished
+        started.set()
+        try:
+            await release.wait()
+            raise RuntimeError("inner failure")
+        finally:
+            finished = True
+
+    inner = asyncio.create_task(fail_after_release())
+    waiter = asyncio.create_task(_wait_for_terminal(inner))
+    await started.wait()
+    waiter.cancel("first cancellation")
+    await asyncio.sleep(0)
+    waiter.cancel("second cancellation")
+    await asyncio.sleep(0)
+
+    assert not waiter.done()
+    assert not inner.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError, match="first cancellation"):
+        await waiter
+
+    assert inner.done()
+    assert finished
+
+
+@pytest.mark.asyncio
+async def test_database_waits_for_failed_migration_after_repeated_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migration_started = threading.Event()
+    migration_release = threading.Event()
+    migration_finished = threading.Event()
+
+    def fail_migration(*_: object) -> None:
+        migration_started.set()
+        migration_release.wait(timeout=5)
+        migration_finished.set()
+        raise RuntimeError("migration failed after cancellation")
+
+    monkeypatch.setattr(database_module, "upgrade_database", fail_migration)
+    database = Database(tmp_path / "portfolio.db")
+    start = asyncio.create_task(database.start())
+    assert await asyncio.to_thread(migration_started.wait, 1)
+
+    start.cancel("first cancellation")
+    await asyncio.sleep(0)
+    start.cancel("second cancellation")
+    await asyncio.sleep(0)
+    assert not start.done()
+    migration_release.set()
+
+    with pytest.raises(asyncio.CancelledError, match="first cancellation"):
+        await start
+    assert migration_finished.is_set()
+    assert database.engine is None
+
+
+@pytest.mark.asyncio
+async def test_database_ping_cancellation_waits_for_ping_and_disposal_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ping_started = asyncio.Event()
+    ping_release = asyncio.Event()
+    ping_finished = False
+    engine = ControlledEngine(dispose_error=RuntimeError("dispose failed"))
+
+    class ControlledConnection:
+        async def __aenter__(self) -> "ControlledConnection":
+            nonlocal ping_finished
+            ping_started.set()
+            try:
+                await ping_release.wait()
+                raise RuntimeError("ping failed")
+            finally:
+                ping_finished = True
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    engine.sync_engine = object()
+    engine.connect = lambda: ControlledConnection()
+    monkeypatch.setattr(database_module, "upgrade_database", lambda *_: None)
+    monkeypatch.setattr(database_module, "create_async_engine", lambda *_args, **_kwargs: engine)
+    monkeypatch.setattr(database_module.event, "listen", lambda *_args, **_kwargs: None)
+    database = Database(tmp_path / "portfolio.db")
+    start = asyncio.create_task(database.start())
+    await ping_started.wait()
+    assert database.engine is None
+    assert database._sessions is None
+
+    start.cancel("ping cancellation")
+    await asyncio.sleep(0)
+    assert not start.done()
+    ping_release.set()
+    await engine.dispose_started.wait()
+    engine.dispose_release.set()
+
+    with pytest.raises(asyncio.CancelledError, match="ping cancellation"):
+        await start
+    assert ping_finished
+    assert engine.dispose_finished
+    assert database.engine is None
+
+
+@pytest.mark.asyncio
+async def test_database_does_not_publish_engine_when_session_factory_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = Database(tmp_path / "portfolio.db")
+
+    def fail_session_factory(*_: object, **__: object) -> Any:
+        raise RuntimeError("session factory failed")
+
+    monkeypatch.setattr(database_module, "async_sessionmaker", fail_session_factory)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_STARTUP_FAILED"):
+        await database.start()
+
+    assert database.engine is None
+    assert database._sessions is None
+
+
+@pytest.mark.asyncio
+async def test_database_close_waits_through_repeated_cancellation_and_disposal_failure(tmp_path: Path) -> None:
+    engine = ControlledEngine(dispose_error=RuntimeError("dispose failed"))
+    database = Database(tmp_path / "portfolio.db")
+    database.engine = cast(Any, engine)
+    database._sessions = cast(Any, object())
+    close = asyncio.create_task(database.close())
+    await engine.dispose_started.wait()
+
+    close.cancel("first close cancellation")
+    await asyncio.sleep(0)
+    close.cancel("second close cancellation")
+    await asyncio.sleep(0)
+    assert not close.done()
+    engine.dispose_release.set()
+
+    with pytest.raises(asyncio.CancelledError, match="first close cancellation"):
+        await close
+    assert engine.dispose_finished
+    assert database.engine is None
+    assert database._sessions is None
+
+
+@pytest.mark.asyncio
+async def test_database_close_maps_uncancelled_disposal_failure_to_stable_error(tmp_path: Path) -> None:
+    engine = ControlledEngine(dispose_error=RuntimeError("dispose failed"))
+    engine.dispose_release.set()
+    database = Database(tmp_path / "portfolio.db")
+    database.engine = cast(Any, engine)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_SHUTDOWN_FAILED") as raised:
+        await database.close()
+
+    assert raised.value.code == "DATABASE_SHUTDOWN_FAILED"
+    assert engine.dispose_finished
+    assert database.engine is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_cannot_be_overtaken_by_start_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migration_started = threading.Event()
+    migration_release = threading.Event()
+    real_upgrade = database_module.upgrade_database
+
+    def delayed_upgrade(*args: object) -> object:
+        migration_started.set()
+        migration_release.wait(timeout=5)
+        return real_upgrade(*args)
+
+    monkeypatch.setattr(database_module, "upgrade_database", delayed_upgrade)
+    database = Database(tmp_path / "portfolio.db")
+    start = asyncio.create_task(database.start())
+    assert await asyncio.to_thread(migration_started.wait, 1)
+    close = asyncio.create_task(database.close())
+    await asyncio.sleep(0)
+    migration_release.set()
+
+    await asyncio.gather(start, close)
+    assert database.engine is None
+    assert database._sessions is None
+    with pytest.raises(DatabaseStartupError, match="DATABASE_NOT_STARTED"):
+        async with database.session():
+            pass
+
+
+def test_upgrade_materializes_zip_backed_migration_tree_for_whole_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "resources.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("portfolio/migrations/env.py", "zip env")
+        archive.writestr("portfolio/migrations/script.py.mako", "zip template")
+        archive.writestr("portfolio/migrations/versions/revision.py", "zip revision")
+    archive = zipfile.ZipFile(archive_path)
+    resource_root = zipfile.Path(archive, "portfolio/")
+    observed_directory: Path | None = None
+
+    def inspect_materialized_tree(path: Path, _: int, migrations_directory: Path) -> str:
+        nonlocal observed_directory
+        observed_directory = migrations_directory
+        assert migrations_directory.is_dir()
+        assert (migrations_directory / "env.py").read_text() == "zip env"
+        assert (migrations_directory / "script.py.mako").read_text() == "zip template"
+        assert (migrations_directory / "versions" / "revision.py").read_text() == "zip revision"
+        return "materialized"
+
+    monkeypatch.setattr(database_module.resources, "files", lambda _: resource_root)
+    monkeypatch.setattr(database_module, "_upgrade_database_with_resources", inspect_materialized_tree)
+    try:
+        assert upgrade_database(tmp_path / "portfolio.db") == "materialized"
+        assert observed_directory is not None
+        assert not observed_directory.exists()
+    finally:
+        archive.close()
+
+
+def test_upgrade_maps_invalid_packaged_resource_to_stable_schema_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migration_file = tmp_path / "not-a-directory"
+    migration_file.write_text("invalid")
+    monkeypatch.setattr(database_module.resources, "files", lambda _: migration_file.parent)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_SCHEMA_UNSUPPORTED") as raised:
+        upgrade_database(tmp_path / "portfolio.db")
+
+    assert raised.value.code == "DATABASE_SCHEMA_UNSUPPORTED"
+
+
+def test_upgrade_maps_packaged_resource_lookup_failure_to_stable_schema_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_lookup(_: str) -> Any:
+        raise FileNotFoundError("package resources unavailable")
+
+    monkeypatch.setattr(database_module.resources, "files", fail_lookup)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_SCHEMA_UNSUPPORTED") as raised:
+        upgrade_database(tmp_path / "portfolio.db")
+
+    assert raised.value.code == "DATABASE_SCHEMA_UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["portfolio?one.db", "portfolio#one.db", "portfolio%one.db", "portfolio one.db"])
+async def test_database_urls_address_exact_special_character_path(tmp_path: Path, filename: str) -> None:
+    path = tmp_path / filename
+    configuration = _configuration(path, 50, MIGRATION_DIRECTORY)
+    alembic_url = configuration.attributes["portfolio_sqlalchemy_url"]
+
+    assert alembic_url.database == str(path.absolute())
+    assert sqlite_async_url(path).database == str(path.absolute())
+    database = Database(path)
+    await database.start()
+    try:
+        assert path.exists()
+        async with database.session() as session:
+            assert (await session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one() == (
+                "20260719_0001"
+            )
+    finally:
+        await database.close()
+
+
+def test_upgrade_restores_original_when_final_permission_enforcement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = legacy_database_fixture(tmp_path)
+    real_set_mode = database_module._set_owner_only_mode
+    path_mode_calls = 0
+
+    def fail_first_database_mode(candidate: Path, mode: int) -> None:
+        nonlocal path_mode_calls
+        if candidate == path:
+            path_mode_calls += 1
+            if path_mode_calls == 1:
+                raise PermissionError("final chmod denied")
+        real_set_mode(candidate, mode)
+
+    monkeypatch.setattr(database_module, "_set_owner_only_mode", fail_first_database_mode)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_MIGRATION_FAILED") as raised:
+        upgrade_database(path)
+
+    assert raised.value.code == "DATABASE_MIGRATION_FAILED"
+    assert path_mode_calls == 2
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT id FROM legacy_records").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
+        ).fetchone() is None
 
 
 @pytest.mark.asyncio

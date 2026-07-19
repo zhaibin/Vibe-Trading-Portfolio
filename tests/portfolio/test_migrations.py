@@ -156,3 +156,12 @@ def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Pat
     assert revision.revision == "20260719_0001"
     assert revision.path is not None
     assert "op.create_table" in Path(revision.path).read_text()
+
+
+def test_packaged_migration_tree_is_the_only_authoring_environment() -> None:
+    migration_directory = Path("src/vibe_portfolio/portfolio/migrations")
+
+    assert (migration_directory / "env.py").is_file()
+    assert (migration_directory / "script.py.mako").is_file()
+    assert not Path("migrations/env.py").exists()
+    assert not Path("migrations/script.py.mako").exists()

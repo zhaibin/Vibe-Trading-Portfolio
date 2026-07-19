@@ -4,23 +4,26 @@ import asyncio
 import os
 import sqlite3
 import stat
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, closing
+from collections.abc import AsyncIterator, Coroutine, Iterator
+from contextlib import asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, TypeVar
 from urllib.parse import quote
 
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import event, text
+from sqlalchemy import URL, event, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 DEFAULT_BUSY_TIMEOUT_MS = 500
+T = TypeVar("T")
 
 
 class DatabaseStartupError(RuntimeError):
@@ -142,10 +145,48 @@ def _migrations_directory() -> Path:
     return path
 
 
+def _copy_traversable_tree(source: Traversable, destination: Path) -> None:
+    if not source.is_dir():
+        raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+    destination.mkdir()
+    for child in source.iterdir():
+        if child.name in {"", ".", ".."} or Path(child.name).name != child.name:
+            raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+        target = destination / child.name
+        if child.is_dir():
+            _copy_traversable_tree(child, target)
+        elif child.is_file():
+            target.write_bytes(child.read_bytes())
+        else:
+            raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+
+
+@contextmanager
+def _materialized_migrations() -> Iterator[Path]:
+    with TemporaryDirectory(prefix="vibe-portfolio-migrations-") as temporary_directory:
+        try:
+            migration_resource = resources.files("vibe_portfolio.portfolio").joinpath("migrations")
+            materialized = Path(temporary_directory) / "migrations"
+            _copy_traversable_tree(migration_resource, materialized)
+        except DatabaseStartupError:
+            raise
+        except Exception as error:
+            raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED") from error
+        yield materialized
+
+
+def _sync_sqlite_url(path: Path) -> URL:
+    return URL.create("sqlite", database=str(path.absolute()))
+
+
 def _configuration(path: Path, busy_timeout_ms: int, migrations_directory: Path | None = None) -> Config:
     config = Config()
     config.set_main_option("script_location", str(migrations_directory or _migrations_directory()))
-    config.set_main_option("sqlalchemy.url", f"sqlite:///{path.absolute()}")
+    sqlalchemy_url = _sync_sqlite_url(path)
+    config.set_main_option(
+        "sqlalchemy.url", sqlalchemy_url.render_as_string(hide_password=False).replace("%", "%%")
+    )
+    config.attributes["portfolio_sqlalchemy_url"] = sqlalchemy_url
     config.attributes["portfolio_busy_timeout_ms"] = busy_timeout_ms
     return config
 
@@ -238,6 +279,7 @@ def _upgrade_database_with_resources(
             _integrity_check(path, busy_timeout_ms)
             if _database_revision(path, busy_timeout_ms) != head:
                 raise DatabaseStartupError("DATABASE_SCHEMA_UNSUPPORTED")
+            _set_owner_only_mode(path, 0o600)
         except BaseException as error:
             if backup_path is not None:
                 _restore_backup(backup_path, path, busy_timeout_ms, error)
@@ -249,20 +291,18 @@ def _upgrade_database_with_resources(
     except BaseException as error:
         _raise_startup_or_busy(error, "DATABASE_STARTUP_FAILED")
 
-    _set_owner_only_mode(path, 0o600)
     assert head is not None
     return DatabaseUpgradeResult(backup_path=backup_path, revision=head)
 
 
 def upgrade_database(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> DatabaseUpgradeResult:
     """Run the complete migration while a packaged resource is materialized."""
-    migration_resource = resources.files("vibe_portfolio.portfolio").joinpath("migrations")
-    with resources.as_file(migration_resource) as migrations_directory:
+    with _materialized_migrations() as migrations_directory:
         return _upgrade_database_with_resources(path, busy_timeout_ms, migrations_directory)
 
 
-def sqlite_async_url(path: Path) -> str:
-    return f"sqlite+aiosqlite:///{path.absolute()}"
+def sqlite_async_url(path: Path) -> URL:
+    return URL.create("sqlite+aiosqlite", database=str(path.absolute()))
 
 
 def enable_sqlite_pragmas(dbapi_connection: Any, _: object, *, busy_timeout_ms: int) -> None:
@@ -275,6 +315,47 @@ def enable_sqlite_pragmas(dbapi_connection: Any, _: object, *, busy_timeout_ms: 
         cursor.close()
 
 
+async def _wait_for_terminal(task: asyncio.Task[T]) -> T:
+    """Wait until *task* is terminal while preserving the caller's first cancellation."""
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if cancellation is None:
+                cancellation = error
+        except BaseException:
+            break
+
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+async def _run_to_terminal(awaitable: Coroutine[Any, Any, T]) -> T:
+    return await _wait_for_terminal(asyncio.create_task(awaitable))
+
+
+async def _verify_engine(engine: AsyncEngine) -> None:
+    async with engine.connect() as connection:
+        await connection.execute(text("select 1"))
+
+
+async def _dispose_engine(engine: AsyncEngine) -> None:
+    try:
+        await _run_to_terminal(engine.dispose())
+    except asyncio.CancelledError:
+        raise
+    except BaseException as error:
+        raise DatabaseStartupError("DATABASE_SHUTDOWN_FAILED") from error
+
+
 class Database:
     """Own the async engine and sessions for the sidecar's local data only."""
 
@@ -283,49 +364,60 @@ class Database:
         self.busy_timeout_ms = busy_timeout_ms
         self.engine: AsyncEngine | None = None
         self._sessions: async_sessionmaker[AsyncSession] | None = None
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        await self.close()
-        try:
-            validate_database_path(self.path)
-            migration = asyncio.create_task(asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms))
+        async with self._lifecycle_lock:
+            await self._close_locked()
+            candidate: AsyncEngine | None = None
+            sessions: async_sessionmaker[AsyncSession] | None = None
             try:
-                await asyncio.shield(migration)
-            except asyncio.CancelledError:
-                await asyncio.shield(migration)
-                raise
-            self.engine = create_async_engine(
-                sqlite_async_url(self.path),
-                pool_pre_ping=True,
-                connect_args={"timeout": self.busy_timeout_ms / 1000},
-            )
-            event.listen(
-                self.engine.sync_engine,
-                "connect",
-                lambda connection, record: enable_sqlite_pragmas(
-                    connection, record, busy_timeout_ms=self.busy_timeout_ms
-                ),
-            )
-            self._sessions = async_sessionmaker(self.engine, expire_on_commit=False)
-            async with self.engine.connect() as connection:
-                await connection.execute(text("select 1"))
-        except BaseException as error:
-            await self.close()
-            if isinstance(error, (DatabaseStartupError, DatabaseBusyError)):
-                raise
-            _raise_startup_or_busy(error, "DATABASE_STARTUP_FAILED")
+                validate_database_path(self.path)
+                await _run_to_terminal(asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms))
+                candidate = create_async_engine(
+                    sqlite_async_url(self.path),
+                    pool_pre_ping=True,
+                    connect_args={"timeout": self.busy_timeout_ms / 1000},
+                )
+                event.listen(
+                    candidate.sync_engine,
+                    "connect",
+                    lambda connection, record: enable_sqlite_pragmas(
+                        connection, record, busy_timeout_ms=self.busy_timeout_ms
+                    ),
+                )
+                await _run_to_terminal(_verify_engine(candidate))
+                sessions = async_sessionmaker(candidate, expire_on_commit=False)
+            except BaseException as error:
+                cleanup_error: BaseException | None = None
+                if candidate is not None:
+                    try:
+                        await _dispose_engine(candidate)
+                    except BaseException as caught_cleanup_error:
+                        cleanup_error = caught_cleanup_error
+                if isinstance(error, asyncio.CancelledError):
+                    raise error from None
+                if isinstance(cleanup_error, asyncio.CancelledError):
+                    raise cleanup_error from None
+                if isinstance(error, (DatabaseStartupError, DatabaseBusyError)):
+                    raise
+                _raise_startup_or_busy(error, "DATABASE_STARTUP_FAILED")
+
+            assert candidate is not None
+            assert sessions is not None
+            self.engine = candidate
+            self._sessions = sessions
 
     async def close(self) -> None:
+        async with self._lifecycle_lock:
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
         engine = self.engine
         self.engine = None
         self._sessions = None
         if engine is not None:
-            disposal = asyncio.create_task(engine.dispose())
-            try:
-                await asyncio.shield(disposal)
-            except asyncio.CancelledError:
-                await asyncio.shield(disposal)
-                raise
+            await _dispose_engine(engine)
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:

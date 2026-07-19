@@ -1,7 +1,7 @@
 """Alembic environment bundled with the portfolio runtime."""
 
 from alembic import context
-from sqlalchemy import engine_from_config, event, pool
+from sqlalchemy import URL, create_engine, event, pool
 
 from vibe_portfolio.portfolio.tables import Base
 
@@ -32,9 +32,13 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    configured_url = config.attributes.get("portfolio_sqlalchemy_url")
+    if not isinstance(configured_url, (str, URL)):
+        configured_url = config.get_main_option("sqlalchemy.url")
+    if configured_url is None:
+        raise RuntimeError("sqlalchemy.url is required")
+    connectable = create_engine(
+        configured_url,
         poolclass=pool.NullPool,
         connect_args={"timeout": busy_timeout_ms / 1000},
     )
