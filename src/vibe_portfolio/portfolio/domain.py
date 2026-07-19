@@ -65,8 +65,12 @@ def _parse_exact(
     return parsed
 
 
-def canonical_symbol(code: str, market: Market) -> str:
+def canonical_symbol(code: str, market: Market | str) -> str:
     """Return the canonical market-qualified identity for an instrument."""
+    try:
+        canonical_market = Market(market)
+    except (TypeError, ValueError) as exc:
+        raise DomainValidationError("market_invalid") from exc
     cleaned = code.strip().upper()
     suffix = {
         Market.CN_SH: "SH",
@@ -74,15 +78,15 @@ def canonical_symbol(code: str, market: Market) -> str:
         Market.CN_BJ: "BJ",
         Market.HK: "HK",
         Market.US: "US",
-    }[market]
+    }[canonical_market]
     base = cleaned.removesuffix(f".{suffix}")
-    if market is Market.HK:
+    if canonical_market is Market.HK:
         if not base.isdigit() or not 1 <= len(base) <= 5:
             raise DomainValidationError("symbol_invalid")
         return f"{base.zfill(5)}.HK"
-    if market in {Market.CN_SH, Market.CN_SZ, Market.CN_BJ} and not re.fullmatch(r"\d{6}", base):
+    if canonical_market in {Market.CN_SH, Market.CN_SZ, Market.CN_BJ} and not re.fullmatch(r"\d{6}", base):
         raise DomainValidationError("symbol_invalid")
-    if market is Market.US and not re.fullmatch(r"[A-Z0-9][A-Z0-9.-]{0,14}", base):
+    if canonical_market is Market.US and not re.fullmatch(r"[A-Z0-9][A-Z0-9.-]{0,14}", base):
         raise DomainValidationError("symbol_invalid")
     return f"{base}.{suffix}"
 

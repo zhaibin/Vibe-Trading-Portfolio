@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -29,6 +30,25 @@ def test_canonical_symbol(code: str, market: Market, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("code", "market", "expected"),
+    [
+        ("700", "HK", "00700.HK"),
+        ("aapl", "US", "AAPL.US"),
+    ],
+)
+def test_canonical_symbol_coerces_supported_raw_market_values(
+    code: str, market: str, expected: str
+) -> None:
+    assert canonical_symbol(code, market) == expected
+
+
+@pytest.mark.parametrize("market", ["not_a_market", "hk", "", None])
+def test_canonical_symbol_rejects_unsupported_raw_market_values(market: object) -> None:
+    with pytest.raises(DomainValidationError, match="market_invalid"):
+        canonical_symbol("700", market)
+
+
+@pytest.mark.parametrize(
     ("code", "market"),
     [
         ("60051", Market.CN_SH),
@@ -55,10 +75,10 @@ def test_money_may_be_zero_but_not_negative() -> None:
 
 
 @pytest.mark.parametrize("parser", [parse_quantity, parse_money, parse_price])
-def test_exact_magnitude_ceiling_is_accepted(parser: object) -> None:
-    assert parser("1000000000000") == Decimal("1000000000000")  # type: ignore[operator]
+def test_exact_magnitude_ceiling_is_accepted(parser: Callable[[str | Decimal], Decimal]) -> None:
+    assert parser("1000000000000") == Decimal("1000000000000")
     with pytest.raises(DomainValidationError, match="_range"):
-        parser("1000000000000.000001")  # type: ignore[operator]
+        parser("1000000000000.000001")
 
 
 def test_decimal_precision_is_rejected_not_rounded() -> None:
