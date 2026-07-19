@@ -33,6 +33,7 @@ class ApiProvider:
             raise RuntimeError("synthetic provider failure")
         if self.empty:
             return []
+        provider_symbol = "105.DEMO" if self.name == "eastmoney" else "DEMO"
         return [
             InstrumentCandidate(
                 canonical_symbol="DEMO.US",
@@ -40,7 +41,7 @@ class ApiProvider:
                 market=Market.US,
                 currency=Currency.USD,
                 asset_type=AssetType.EQUITY,
-                provider_symbols=(ProviderSymbol(self.name, f"{self.name}-DEMO"),),
+                provider_symbols=(ProviderSymbol(self.name, provider_symbol),),
             )
         ][:limit]
 
@@ -107,8 +108,8 @@ async def test_search_returns_opaque_candidates_that_confirmation_consumes(datab
     async with database.session() as session:
         mappings = (await session.scalars(select(InstrumentProviderSymbolRow))).all()
     assert {(mapping.provider, mapping.provider_symbol) for mapping in mappings} == {
-        ("eastmoney", "eastmoney-DEMO"),
-        ("yahoo", "yahoo-DEMO"),
+        ("eastmoney", "105.DEMO"),
+        ("yahoo", "DEMO"),
     }
 
 
@@ -151,3 +152,13 @@ async def test_search_api_distinguishes_total_failure_from_empty_success(databas
     )
     assert empty.status_code == 200
     assert empty.json() == []
+
+
+async def test_search_api_keeps_valid_partial_result_when_one_provider_fails(database: Database) -> None:
+    response = await request(
+        app_for(database, (ApiProvider("eastmoney", fails=True), ApiProvider("yahoo"))),
+        "GET",
+        "/api/v1/instruments/search?q=demo&limit=5",
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["sources"] == ["yahoo"]
