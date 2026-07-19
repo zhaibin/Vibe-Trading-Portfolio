@@ -686,7 +686,7 @@ class PortfolioRepository:
                 .join(QuoteRefreshRunRow, QuoteRefreshRunRow.id == QuoteRefreshItemRow.run_id)
                 .where(
                     QuoteRefreshItemRow.instrument_id.in_(instrument_ids),
-                    QuoteRefreshRunRow.status.in_(("completed", "partial", "failed")),
+                    QuoteRefreshRunRow.status.in_(("completed", "partial")),
                     QuoteRefreshRunRow.finished_at.is_not(None),
                 )
                 .order_by(

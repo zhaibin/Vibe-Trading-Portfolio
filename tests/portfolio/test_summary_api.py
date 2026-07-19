@@ -1,8 +1,9 @@
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -286,103 +287,34 @@ async def test_summary_endpoint_is_currency_local_exact_archived_safe_and_has_no
     assert network_calls == []
 
 
-async def test_summary_uses_the_latest_terminal_attempt_with_deterministic_timestamp_ordering(
+async def summary_for_refresh_history(
     database: Database,
-) -> None:
-    now = datetime.now(UTC)
+    *,
+    now: datetime,
+    runs: Sequence[QuoteRefreshRunRow],
+    items: Sequence[QuoteRefreshItemRow],
+    quote_run_id: str | None,
+) -> dict[str, Any]:
     account_id = "50000000-0000-4000-8000-000000000001"
-    running_instrument_id = "60000000-0000-4000-8000-000000000001"
-    tied_instrument_id = "60000000-0000-4000-8000-000000000002"
-    completed_run_id = "70000000-0000-4000-8000-000000000001"
-    running_run_id = "70000000-0000-4000-8000-000000000002"
-    tied_updated_run_id = "f0000000-0000-4000-8000-000000000001"
-    tied_failed_run_id = "10000000-0000-4000-8000-000000000001"
-    tied_created_at = now - timedelta(hours=2)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
     foundations = [
         account_row(account_id, name="刷新账户", currency="CNY", cash="0", now=now),
-        instrument_row(
-            running_instrument_id,
-            symbol="600000.SH",
-            market="CN_SH",
-            currency="CNY",
-            now=now,
-        ),
-        instrument_row(
-            tied_instrument_id,
-            symbol="600001.SH",
-            market="CN_SH",
-            currency="CNY",
-            now=now,
-        ),
-        refresh_run(
-            completed_run_id,
-            status="completed",
-            started_at=now - timedelta(hours=4),
-            finished_at=now - timedelta(hours=3),
-        ),
-        refresh_run(
-            running_run_id,
-            status="running",
-            started_at=now - timedelta(minutes=30),
-            finished_at=None,
-        ),
-        refresh_run(
-            tied_updated_run_id,
-            status="completed",
-            started_at=now - timedelta(hours=4),
-            finished_at=now - timedelta(hours=3),
-        ),
-        refresh_run(
-            tied_failed_run_id,
-            status="failed",
-            started_at=now - timedelta(hours=3),
-            finished_at=now - timedelta(hours=1),
-        ),
+        instrument_row(instrument_id, symbol="600000.SH", market="CN_SH", currency="CNY", now=now),
+        *runs,
     ]
-    dependents = [
+    dependents: list[object] = [
         position_row(
             "80000000-0000-4000-8000-000000000001",
             account_id=account_id,
-            instrument_id=running_instrument_id,
+            instrument_id=instrument_id,
             quantity="1",
             average_cost="5",
             now=now,
         ),
-        position_row(
-            "80000000-0000-4000-8000-000000000002",
-            account_id=account_id,
-            instrument_id=tied_instrument_id,
-            quantity="1",
-            average_cost="5",
-            now=now,
-        ),
-        latest_quote(running_instrument_id, run_id=completed_run_id, price="10", currency="CNY", now=now),
-        latest_quote(tied_instrument_id, run_id=tied_updated_run_id, price="10", currency="CNY", now=now),
-        refresh_item(
-            completed_run_id,
-            running_instrument_id,
-            outcome="updated",
-            created_at=now - timedelta(hours=3),
-        ),
-        refresh_item(
-            running_run_id,
-            running_instrument_id,
-            outcome="unavailable",
-            created_at=now - timedelta(minutes=29),
-        ),
-        refresh_item(
-            tied_updated_run_id,
-            tied_instrument_id,
-            outcome="updated",
-            created_at=tied_created_at,
-        ),
-        refresh_item(
-            tied_failed_run_id,
-            tied_instrument_id,
-            outcome="unavailable",
-            created_at=tied_created_at,
-        ),
+        *items,
     ]
+    if quote_run_id is not None:
+        dependents.append(latest_quote(instrument_id, run_id=quote_run_id, price="10", currency="CNY", now=now))
     async with database.session() as session, session.begin():
         session.add_all(foundations)
         await session.flush()
@@ -392,11 +324,249 @@ async def test_summary_uses_the_latest_terminal_attempt_with_deterministic_times
         response = await client.get("/api/v1/portfolio/summary?currency=CNY")
 
     assert response.status_code == 200
-    positions = {item["instrument_id"]: item for item in response.json()["positions"]}
-    assert positions[running_instrument_id]["quote_state"] == "fresh"
-    assert positions[tied_instrument_id]["quote_state"] == "stale"
-    assert response.json()["stale_count"] == 1
-    assert response.json()["estimated"] is True
+    return response.json()
+
+
+async def test_newer_failed_refresh_is_ignored_for_summary_freshness(database: Database) -> None:
+    now = datetime.now(UTC)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
+    completed_run_id = "70000000-0000-4000-8000-000000000001"
+    failed_run_id = "70000000-0000-4000-8000-000000000002"
+    result = await summary_for_refresh_history(
+        database,
+        now=now,
+        runs=[
+            refresh_run(
+                completed_run_id,
+                status="completed",
+                started_at=now - timedelta(hours=4),
+                finished_at=now - timedelta(hours=3),
+            ),
+            refresh_run(
+                failed_run_id,
+                status="failed",
+                started_at=now - timedelta(hours=2),
+                finished_at=now - timedelta(hours=1),
+            ),
+        ],
+        items=[
+            refresh_item(
+                completed_run_id,
+                instrument_id,
+                outcome="updated",
+                created_at=now - timedelta(hours=3),
+            ),
+            refresh_item(
+                failed_run_id,
+                instrument_id,
+                outcome="unavailable",
+                created_at=now - timedelta(hours=1),
+            ),
+        ],
+        quote_run_id=completed_run_id,
+    )
+
+    assert result["positions"][0]["quote_state"] == "fresh"
+    assert result["estimated"] is False
+
+
+async def test_newer_running_refresh_is_ignored_for_summary_freshness(database: Database) -> None:
+    now = datetime.now(UTC)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
+    completed_run_id = "70000000-0000-4000-8000-000000000001"
+    running_run_id = "70000000-0000-4000-8000-000000000002"
+    result = await summary_for_refresh_history(
+        database,
+        now=now,
+        runs=[
+            refresh_run(
+                completed_run_id,
+                status="completed",
+                started_at=now - timedelta(hours=4),
+                finished_at=now - timedelta(hours=3),
+            ),
+            refresh_run(
+                running_run_id,
+                status="running",
+                started_at=now - timedelta(minutes=30),
+                finished_at=None,
+            ),
+        ],
+        items=[
+            refresh_item(
+                completed_run_id,
+                instrument_id,
+                outcome="updated",
+                created_at=now - timedelta(hours=3),
+            ),
+            refresh_item(
+                running_run_id,
+                instrument_id,
+                outcome="unavailable",
+                created_at=now - timedelta(minutes=29),
+            ),
+        ],
+        quote_run_id=completed_run_id,
+    )
+
+    assert result["positions"][0]["quote_state"] == "fresh"
+    assert result["estimated"] is False
+
+
+async def test_newer_partial_refresh_is_eligible_for_summary_freshness(database: Database) -> None:
+    now = datetime.now(UTC)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
+    completed_run_id = "70000000-0000-4000-8000-000000000001"
+    partial_run_id = "70000000-0000-4000-8000-000000000002"
+    result = await summary_for_refresh_history(
+        database,
+        now=now,
+        runs=[
+            refresh_run(
+                completed_run_id,
+                status="completed",
+                started_at=now - timedelta(hours=4),
+                finished_at=now - timedelta(hours=3),
+            ),
+            refresh_run(
+                partial_run_id,
+                status="partial",
+                started_at=now - timedelta(hours=2),
+                finished_at=now - timedelta(hours=1),
+            ),
+        ],
+        items=[
+            refresh_item(
+                completed_run_id,
+                instrument_id,
+                outcome="updated",
+                created_at=now - timedelta(hours=3),
+            ),
+            refresh_item(
+                partial_run_id,
+                instrument_id,
+                outcome="stale",
+                created_at=now - timedelta(hours=1),
+            ),
+        ],
+        quote_run_id=completed_run_id,
+    )
+
+    assert result["positions"][0]["quote_state"] == "stale"
+    assert result["estimated"] is True
+
+
+async def test_eligible_refresh_ties_use_finished_time_before_run_id(database: Database) -> None:
+    now = datetime.now(UTC)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
+    completed_run_id = "f0000000-0000-4000-8000-000000000001"
+    partial_run_id = "10000000-0000-4000-8000-000000000001"
+    tied_created_at = now - timedelta(hours=2)
+    result = await summary_for_refresh_history(
+        database,
+        now=now,
+        runs=[
+            refresh_run(
+                completed_run_id,
+                status="completed",
+                started_at=now - timedelta(hours=4),
+                finished_at=now - timedelta(hours=3),
+            ),
+            refresh_run(
+                partial_run_id,
+                status="partial",
+                started_at=now - timedelta(hours=3),
+                finished_at=now - timedelta(hours=1),
+            ),
+        ],
+        items=[
+            refresh_item(completed_run_id, instrument_id, outcome="updated", created_at=tied_created_at),
+            refresh_item(partial_run_id, instrument_id, outcome="unavailable", created_at=tied_created_at),
+        ],
+        quote_run_id=completed_run_id,
+    )
+
+    assert result["positions"][0]["quote_state"] == "stale"
+    assert result["estimated"] is True
+
+
+async def test_eligible_refresh_exact_ties_use_run_id(database: Database) -> None:
+    now = datetime.now(UTC)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
+    completed_run_id = "10000000-0000-4000-8000-000000000001"
+    partial_run_id = "f0000000-0000-4000-8000-000000000001"
+    tied_created_at = now - timedelta(hours=2)
+    tied_finished_at = now - timedelta(hours=1)
+    result = await summary_for_refresh_history(
+        database,
+        now=now,
+        runs=[
+            refresh_run(
+                completed_run_id,
+                status="completed",
+                started_at=now - timedelta(hours=4),
+                finished_at=tied_finished_at,
+            ),
+            refresh_run(
+                partial_run_id,
+                status="partial",
+                started_at=now - timedelta(hours=3),
+                finished_at=tied_finished_at,
+            ),
+        ],
+        items=[
+            refresh_item(completed_run_id, instrument_id, outcome="updated", created_at=tied_created_at),
+            refresh_item(partial_run_id, instrument_id, outcome="unavailable", created_at=tied_created_at),
+        ],
+        quote_run_id=completed_run_id,
+    )
+
+    assert result["positions"][0]["quote_state"] == "stale"
+    assert result["estimated"] is True
+
+
+async def test_no_eligible_refresh_or_quote_remains_unavailable(database: Database) -> None:
+    now = datetime.now(UTC)
+    instrument_id = "60000000-0000-4000-8000-000000000001"
+    failed_run_id = "70000000-0000-4000-8000-000000000001"
+    running_run_id = "70000000-0000-4000-8000-000000000002"
+    result = await summary_for_refresh_history(
+        database,
+        now=now,
+        runs=[
+            refresh_run(
+                failed_run_id,
+                status="failed",
+                started_at=now - timedelta(hours=2),
+                finished_at=now - timedelta(hours=1),
+            ),
+            refresh_run(
+                running_run_id,
+                status="running",
+                started_at=now - timedelta(minutes=30),
+                finished_at=None,
+            ),
+        ],
+        items=[
+            refresh_item(
+                failed_run_id,
+                instrument_id,
+                outcome="unavailable",
+                created_at=now - timedelta(hours=1),
+            ),
+            refresh_item(
+                running_run_id,
+                instrument_id,
+                outcome="unavailable",
+                created_at=now - timedelta(minutes=29),
+            ),
+        ],
+        quote_run_id=None,
+    )
+
+    assert result["market_value"] == "0.000000"
+    assert result["unvalued_count"] == 1
+    assert result["positions"][0]["quote_state"] == "unavailable"
 
 
 @pytest.mark.parametrize(
