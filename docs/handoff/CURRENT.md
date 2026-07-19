@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-19
 **Project:** Vibe-Trading Portfolio sidecar
-**Current milestone:** Milestone 0 compatibility foundation completed and live-contract stabilization verified; portfolio product implementation not started
+**Current milestone:** Milestone 0 compatibility foundation completed; Experience Milestone 1A WebUI/independent-market-data design approved and audited; implementation planning not started
 
 ## Start here
 
@@ -15,7 +15,8 @@ The following state was verified after local stabilization testing on 2026-07-19
 - Target/integration branch: `main`
 - Last verified active branch: `main`
 - Local stabilization integration: `main` fast-forwarded from `3f3e081` to `96aeb56` after the merged-result gate passed
-- Last verified published head before this handoff update: `6ecf516` (`docs: record remote history reconciliation`)
+- Last verified published head: `c65c004` (`docs: record successful remote publication`)
+- Approved Experience Milestone 1A design: `ee60736` (`docs: design portfolio experience webui`); this local design commit has not yet been pushed
 - Live stabilization commits: `c15c12f` (`fix: poll for runtime terminal proof`), `7a26e3a` (`fix: validate goal-aware MCP probe events`), and `ef6938c` (`fix: retry runtime cancel registration race`)
 - Live stabilization design/plan commits: `e1316f7`, `1d207b9`, and `3f3e081`
 - Integrated handoff branch: `docs/new-session-handoff`
@@ -64,6 +65,8 @@ The latest hermetic verification on `codex/live-contract-stabilization` reported
 
 Do not describe the project as having a usable personal portfolio module yet.
 
+The approved next milestone is now specified, but none of its runtime capability is implemented. In particular, the repository still has no React WebUI, accounts/positions database, independent instrument search, quote refresh, valuation summary, frontend test suite, or portfolio migrations.
+
 ## Hard boundaries
 
 - `/Users/zhaibin/Dev/AInvest` is the separate upstream Vibe checkout and must not be modified by sidecar work.
@@ -77,6 +80,7 @@ Do not describe the project as having a usable personal portfolio module yet.
 ## Authoritative references
 
 - [Product design](../superpowers/specs/2026-07-18-personal-portfolio-sidecar-design.md)
+- [Experience Milestone 1A WebUI and independent market data design](../superpowers/specs/2026-07-19-portfolio-experience-webui-design.md)
 - [Milestone 0 implementation plan](../superpowers/plans/2026-07-18-vibe-compatibility-spike.md)
 - [New-session handoff design](../superpowers/specs/2026-07-19-new-session-handoff-design.md)
 - [Live-contract stabilization design](../superpowers/specs/2026-07-19-live-contract-stabilization-design.md)
@@ -110,15 +114,27 @@ The route-only, live runtime, and full MCP commands are intentionally documented
 - The sidecar preserves the former unrelated remote initial commit and `LICENSE` through merge commit `6b1ee52`. Future pushes can use normal fast-forward semantics; force-push remains unnecessary.
 - Vibe compatibility is intentionally limited to `>=0.1.11,<0.2.0`; widening it requires updated fixtures and passing layered gates.
 - Live runtime and MCP results are explicit dated local evidence, not a substitute for rerunning them after dependency, provider, operator configuration, or upstream changes.
-- The next milestone must define privacy, retention, precision, currency, and migration rules before storing personal holdings.
+- Experience Milestone 1A is an explicitly staged current-position snapshot experience, not the umbrella design's formal immutable-ledger MVP. It uses one fixed currency per account and never emits a cross-currency total.
+- Market search and quotes will be implemented inside the Sidecar through isolated provider adapters; they will not depend on Vibe-Trading or import AInvest internals. Quotes refresh only on explicit user action, and failed refreshes preserve and visibly mark the last valid quote as stale.
+- The first WebUI is a same-origin React/TypeScript SPA served by FastAPI on loopback. It has no login; Host/Origin/Fetch Metadata/CSP controls are mandatory compensations, and non-loopback deployment remains blocked.
+- Public quote endpoints remain replaceable external dependencies with availability and usage-condition risk. Default tests must use fakes; real-provider smoke tests are opt-in and skipped means not run.
+- Snapshot holdings cannot provide transaction-derived cost basis, realized returns, or reconciled performance. A future ledger migration must create explicit opening events with provenance and must not invent transaction history.
 
 ## Current blockers
 
-Current code/test blockers: none known. Local branch integration, remote-history reconciliation, and normal remote publication are complete. Future holdings-domain work still requires a separately approved design.
+Current code/test blockers: none known. The Experience Milestone 1A design audit resolved its architecture, data, security, failure, and test-boundary conflicts. The written specification still requires final user review before an implementation plan is produced.
 
 ## Recommended next step
 
-Propose and obtain user approval for a focused design of the holdings domain model and local storage boundary. That design should cover accounts, instruments, positions, transactions or snapshots, currency and precision, import idempotency, privacy, migrations, and the bounded portfolio context supplied to Vibe.
+Have the user review the written [Experience Milestone 1A design](../superpowers/specs/2026-07-19-portfolio-experience-webui-design.md). After explicit approval, use the planning workflow to produce a TDD implementation plan covering backend persistence/API, independent provider adapters, the React WebUI, security middleware, migrations, hermetic E2E, and retained compatibility gates.
+
+## Latest design verification
+
+- The new specification was checked with `git diff --cached --check`; no whitespace errors remained before commit.
+- Its relative links to the umbrella design and current handoff resolve locally.
+- A live CodeGraph audit confirmed that the current FastAPI app has three compatibility operations composed in `create_app`; the new design preserves their semantics while intentionally replacing the old exact-total-route test with a scoped compatibility-route invariant.
+- The audit records 15 resolved findings and six accepted residual risks, including the snapshot-versus-ledger staging boundary, loopback no-auth limitation, quote-provider instability, and non-calendar-aware freshness rule.
+- No Python, frontend, live-provider, Vibe runtime, or MCP test gate was rerun because this change is documentation-only. The previously recorded test results remain dated evidence, not fresh verification.
 
 ## End-of-session update checklist
 
