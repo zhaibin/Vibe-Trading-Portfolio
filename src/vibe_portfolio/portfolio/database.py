@@ -71,17 +71,24 @@ def _set_owner_only_mode(path: Path, mode: int) -> None:
         raise OSError(f"could not enforce mode {mode:o}")
 
 
+def _lstat_mode(path: Path) -> int | None:
+    try:
+        return os.lstat(path).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise DatabaseStartupError("DATABASE_PATH_UNSAFE") from error
+
+
 def _assert_safe_path(path: Path) -> None:
     for component in (path.parent, *path.parent.parents):
-        try:
-            component_mode = os.lstat(component).st_mode
-        except FileNotFoundError:
+        component_mode = _lstat_mode(component)
+        if component_mode is None:
             continue
         if stat.S_ISLNK(component_mode):
             raise DatabaseStartupError("DATABASE_PATH_UNSAFE")
-    try:
-        path_mode = os.lstat(path).st_mode
-    except FileNotFoundError:
+    path_mode = _lstat_mode(path)
+    if path_mode is None:
         return
     if stat.S_ISLNK(path_mode) or not stat.S_ISREG(path_mode):
         raise DatabaseStartupError("DATABASE_PATH_UNSAFE")
@@ -89,8 +96,8 @@ def _assert_safe_path(path: Path) -> None:
 
 def validate_database_path(path: Path) -> None:
     """Create and enforce a private non-symlinked local storage location."""
-    _assert_safe_path(path)
     try:
+        _assert_safe_path(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         _assert_safe_path(path)
         _set_owner_only_mode(path.parent, 0o700)

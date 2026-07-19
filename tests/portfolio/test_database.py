@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 import threading
 import time
@@ -283,6 +284,41 @@ def test_upgrade_materializes_zip_backed_migration_tree_for_whole_operation(
         archive.close()
 
 
+def test_upgrade_runs_real_alembic_migration_from_zip_backed_canonical_resources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive_path = tmp_path / "canonical-resources.zip"
+    resource_paths = (
+        Path("env.py"),
+        Path("script.py.mako"),
+        Path("versions/20260719_0001_portfolio_snapshot.py"),
+    )
+    with zipfile.ZipFile(archive_path, "w") as writer:
+        for relative_path in resource_paths:
+            writer.writestr(
+                f"portfolio/migrations/{relative_path.as_posix()}",
+                (MIGRATION_DIRECTORY / relative_path).read_bytes(),
+            )
+
+    archive = zipfile.ZipFile(archive_path)
+    resource_root = zipfile.Path(archive, "portfolio/")
+    monkeypatch.setattr(database_module.resources, "files", lambda _: resource_root)
+    path = tmp_path / "zip-backed? #%.db"
+    try:
+        result = upgrade_database(path)
+    finally:
+        archive.close()
+
+    assert result.revision == "20260719_0001"
+    assert path.is_file()
+    assert not (tmp_path / "zip-backed").exists()
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260719_0001",)
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'accounts'"
+        ).fetchone() == (1,)
+
+
 def test_upgrade_maps_invalid_packaged_resource_to_stable_schema_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -397,6 +433,48 @@ async def test_database_rejects_broken_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(DatabaseStartupError, match="DATABASE_PATH_UNSAFE"):
         await Database(path).start()
+
+
+def test_upgrade_maps_lstat_permission_failure_to_path_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "portfolio.db"
+    real_lstat = os.lstat
+
+    def deny_inspection(candidate: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if Path(candidate) == path and not args and not kwargs:
+            raise PermissionError("lstat denied")
+        return real_lstat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(database_module.os, "lstat", deny_inspection)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_PATH_UNSAFE") as raised:
+        upgrade_database(path)
+
+    assert raised.value.code == "DATABASE_PATH_UNSAFE"
+
+
+@pytest.mark.asyncio
+async def test_database_start_maps_lstat_permission_failure_to_path_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "portfolio.db"
+    real_lstat = os.lstat
+
+    def deny_inspection(candidate: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if Path(candidate) == path and not args and not kwargs:
+            raise PermissionError("lstat denied")
+        return real_lstat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(database_module.os, "lstat", deny_inspection)
+    database = Database(path)
+
+    with pytest.raises(DatabaseStartupError, match="DATABASE_PATH_UNSAFE") as raised:
+        await database.start()
+
+    assert raised.value.code == "DATABASE_PATH_UNSAFE"
+    assert database.engine is None
+    assert database._sessions is None
 
 
 @pytest.mark.asyncio
