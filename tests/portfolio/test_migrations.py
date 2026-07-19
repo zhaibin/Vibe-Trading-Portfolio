@@ -9,7 +9,12 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from vibe_portfolio.portfolio.database import _configuration
-from vibe_portfolio.portfolio.tables import AccountVersionRow, IdempotencyRow, QuoteRefreshRunRow
+from vibe_portfolio.portfolio.tables import (
+    AccountVersionRow,
+    IdempotencyRow,
+    PositionVersionRow,
+    QuoteRefreshRunRow,
+)
 
 
 def _upgrade_database(path: Path, revision: str = "head") -> None:
@@ -34,6 +39,7 @@ def test_initial_migration_creates_all_snapshot_tables(tmp_path: Path) -> None:
         "instrument_candidates",
         "idempotency_records",
         "account_versions",
+        "position_versions",
     } <= tables
 
 
@@ -42,7 +48,7 @@ def test_initial_migration_has_revision_and_material_schema_behavior(tmp_path: P
     _upgrade_database(path)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0003",)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0004",)
         foreign_keys = connection.execute("PRAGMA foreign_key_list(positions)").fetchall()
         assert {foreign_key[2] for foreign_key in foreign_keys} == {"accounts", "instruments"}
         indexes = connection.execute("PRAGMA index_list(positions)").fetchall()
@@ -155,11 +161,10 @@ def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Pat
     runtime_script = ScriptDirectory.from_config(runtime_config)
     assert root_script.dir == runtime_script.dir
     revision = next(runtime_script.walk_revisions())
-    assert revision.revision == "20260719_0003"
+    assert revision.revision == "20260719_0004"
     assert revision.path is not None
     migration_source = Path(revision.path).read_text()
-    assert "account_versions" in migration_source
-    assert "response_json" in migration_source
+    assert "position_versions" in migration_source
 
 
 def test_privacy_migration_moves_valid_replay_state_to_history_and_drops_response_json(tmp_path: Path) -> None:
@@ -309,9 +314,13 @@ def test_migrated_schema_matches_idempotency_and_account_history_orm_metadata(tm
             row[1] for row in connection.execute("pragma table_info(idempotency_records)").fetchall()
         }
         history_columns = {row[1] for row in connection.execute("pragma table_info(account_versions)").fetchall()}
+        position_history_columns = {
+            row[1] for row in connection.execute("pragma table_info(position_versions)").fetchall()
+        }
 
     assert idempotency_columns == set(IdempotencyRow.__table__.columns.keys())
     assert history_columns == set(AccountVersionRow.__table__.columns.keys())
+    assert position_history_columns == set(PositionVersionRow.__table__.columns.keys())
 
 
 def test_packaged_migration_tree_is_the_only_authoring_environment() -> None:

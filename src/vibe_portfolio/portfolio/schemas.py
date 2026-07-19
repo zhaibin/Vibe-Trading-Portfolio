@@ -3,11 +3,20 @@
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Generic, TypeAlias, TypeVar
+from typing import Annotated, Generic, Self, TypeAlias, TypeVar
+from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, WithJsonSchema
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, WithJsonSchema, model_validator
 
-from vibe_portfolio.portfolio.domain import Currency, DomainValidationError, parse_money, parse_price, parse_quantity
+from vibe_portfolio.portfolio.domain import (
+    AssetType,
+    Currency,
+    DomainValidationError,
+    Market,
+    parse_money,
+    parse_price,
+    parse_quantity,
+)
 
 
 def _exact_input(parser: Callable[[str], Decimal]) -> Callable[[object], Decimal]:
@@ -67,6 +76,60 @@ class AccountView(BaseModel):
     name: str
     currency: Currency
     cash_balance: DecimalOutput | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+
+
+class InstrumentConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: UUID
+
+
+class InstrumentView(BaseModel):
+    id: str
+    canonical_symbol: str
+    name: str
+    market: Market
+    currency: Currency
+    asset_type: AssetType
+    created_at: datetime
+    updated_at: datetime
+
+
+class PositionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account_id: UUID
+    instrument_id: UUID
+    quantity: QuantityInput
+    average_cost: MoneyInput
+    note: str | None = None
+
+
+class PositionPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=0)
+    quantity: QuantityInput | None = None
+    average_cost: MoneyInput | None = None
+    note: str | None = None
+    archived: bool | None = None
+
+    @model_validator(mode="after")
+    def reject_null_numeric_updates(self) -> Self:
+        for field in ("quantity", "average_cost"):
+            if field in self.model_fields_set and getattr(self, field) is None:
+                raise ValueError(f"{field}_required")
+        return self
+
+
+class PositionView(BaseModel):
+    id: str
+    account_id: str
+    instrument_id: str
+    quantity: DecimalOutput
+    average_cost: DecimalOutput
+    note: str | None
     version: int
     created_at: datetime
     updated_at: datetime

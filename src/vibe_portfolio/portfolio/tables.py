@@ -115,6 +115,24 @@ class PositionRow(Base):
     archived_at: Mapped[datetime | None] = mapped_column(UtcIsoDateTime(), nullable=True)
 
 
+class PositionVersionRow(Base):
+    """Append-only position state used for exact idempotent replay."""
+
+    __tablename__ = "position_versions"
+    __table_args__ = (CheckConstraint("version >= 1", name="ck_position_versions_version"),)
+
+    position_id: Mapped[str] = mapped_column(ForeignKey("positions.id"), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False)
+    instrument_id: Mapped[str] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    quantity: Mapped[str] = mapped_column(Text, nullable=False)
+    average_cost: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    archived_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class QuoteRefreshRunRow(Base):
     __tablename__ = "quote_refresh_runs"
     __table_args__ = (
