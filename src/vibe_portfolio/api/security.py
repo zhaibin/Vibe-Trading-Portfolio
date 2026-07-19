@@ -63,8 +63,11 @@ class SecurityMiddleware:
                 message["type"] == "http.request" and bool(message.get("body", b""))
                 for message in messages
             )
-            requires_json = path.startswith("/api/v1/") and path != _PROBE_PATH and (
-                method in _JSON_METHODS or has_body
+            zero_body_probe = path == _PROBE_PATH and not has_body
+            requires_json = (
+                path.startswith("/api/v1/")
+                and not zero_body_probe
+                and (method in _JSON_METHODS or has_body)
             )
             if requires_json and _media_type(headers) != "application/json":
                 await self._respond(_error("JSON_REQUIRED", 415), scope, receive, send)

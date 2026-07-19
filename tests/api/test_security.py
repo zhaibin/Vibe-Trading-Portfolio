@@ -136,6 +136,61 @@ def test_zero_body_probe_remains_allowed_without_json_content_type() -> None:
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("headers", "body"),
+    [
+        ({}, b"x"),
+        ({"Content-Type": "text/plain"}, b"{}"),
+    ],
+)
+def test_nonempty_probe_body_requires_json_content_type(
+    headers: dict[str, str], body: bytes
+) -> None:
+    app = full_app()
+    request_headers = {"Origin": BASE_URL, **headers}
+    with TestClient(app, base_url=BASE_URL) as client:
+        response = client.post(
+            "/api/v1/system/compatibility/mcp-probe",
+            headers=request_headers,
+            content=body,
+        )
+
+    assert response.status_code == 415
+    assert response.json() == {"error": {"code": "JSON_REQUIRED"}}
+
+
+def test_nonempty_probe_body_allows_application_json() -> None:
+    app = full_app()
+    with TestClient(app, base_url=BASE_URL) as client:
+        response = client.post(
+            "/api/v1/system/compatibility/mcp-probe",
+            headers={"Origin": BASE_URL, "Content-Type": "application/json"},
+            content=b"{}",
+        )
+
+    assert response.status_code == 200
+
+
+async def test_chunked_nonempty_probe_body_requires_json_content_type() -> None:
+    app = full_app()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"{"
+        yield b"}"
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url=BASE_URL
+    ) as client:
+        response = await client.post(
+            "/api/v1/system/compatibility/mcp-probe",
+            content=chunks(),
+            headers={"Origin": BASE_URL},
+        )
+
+    assert response.status_code == 415
+    assert response.json() == {"error": {"code": "JSON_REQUIRED"}}
+
+
 async def test_chunked_request_body_is_bounded_before_routing() -> None:
     app = full_app()
 

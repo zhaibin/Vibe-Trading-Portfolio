@@ -40,13 +40,30 @@ def static_dir(tmp_path: Path) -> Path:
     assets = root / "assets"
     assets.mkdir(parents=True)
     (root / "index.html").write_text("<!doctype html><title>Portfolio</title>", encoding="utf-8")
-    (assets / "app-C0FFEE12.js").write_text("console.log('safe')", encoding="utf-8")
+    (assets / "app-0123456789abcdef.js").write_text("console.log('safe')", encoding="utf-8")
+    (assets / "chunk-fedcba9876543210.js").write_text(
+        "console.log('unlisted')", encoding="utf-8"
+    )
+    (assets / "upper-0123456789ABCDEF.js").write_text(
+        "console.log('uppercase')", encoding="utf-8"
+    )
+    (assets / "short-01234567.js").write_text("console.log('short')", encoding="utf-8")
     (assets / "portfolio-settings.js").write_text("console.log('ordinary')", encoding="utf-8")
     (assets / "logo.svg").write_text("<svg></svg>", encoding="utf-8")
     manifest = root / ".vite/manifest.json"
     manifest.parent.mkdir()
     manifest.write_text(
-        json.dumps({"src/main.tsx": {"file": "assets/app-C0FFEE12.js", "isEntry": True}}),
+        json.dumps(
+            {
+                "src/main.tsx": {
+                    "file": "assets/app-0123456789abcdef.js",
+                    "isEntry": True,
+                },
+                "src/portfolio-settings.ts": {"file": "assets/portfolio-settings.js"},
+                "src/upper.ts": {"file": "assets/upper-0123456789ABCDEF.js"},
+                "src/short.ts": {"file": "assets/short-01234567.js"},
+            }
+        ),
         encoding="utf-8",
     )
     return root
@@ -73,16 +90,55 @@ def test_get_only_extensionless_spa_routes_serve_index(static_dir: Path, path: s
     assert response.text == "<!doctype html><title>Portfolio</title>"
 
 
-def test_hashed_assets_are_immutable_but_unhashed_assets_are_not(static_dir: Path) -> None:
+def test_manifest_listed_hex_digest_asset_is_immutable(static_dir: Path) -> None:
     with TestClient(static_app(static_dir), base_url=BASE_URL) as client:
-        hashed = client.get("/assets/app-C0FFEE12.js")
-        ordinary_hyphenated = client.get("/assets/portfolio-settings.js")
-        unhashed = client.get("/assets/logo.svg")
+        response = client.get("/assets/app-0123456789abcdef.js")
 
-    assert hashed.status_code == ordinary_hyphenated.status_code == unhashed.status_code == 200
-    assert hashed.headers["Cache-Control"] == "public, max-age=31536000, immutable"
-    assert ordinary_hyphenated.headers["Cache-Control"] == "no-store"
-    assert unhashed.headers["Cache-Control"] == "no-store"
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+
+@pytest.mark.parametrize(
+    "asset_path",
+    [
+        "/assets/portfolio-settings.js",
+        "/assets/chunk-fedcba9876543210.js",
+        "/assets/upper-0123456789ABCDEF.js",
+        "/assets/short-01234567.js",
+        "/assets/logo.svg",
+    ],
+)
+def test_non_immutable_assets_are_no_store(static_dir: Path, asset_path: str) -> None:
+    with TestClient(static_app(static_dir), base_url=BASE_URL) as client:
+        response = client.get(asset_path)
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("manifest_state", ["missing", "malformed"])
+def test_asset_is_no_store_without_a_valid_vite_manifest(
+    static_dir: Path, manifest_state: str
+) -> None:
+    manifest_path = static_dir / ".vite/manifest.json"
+    if manifest_state == "missing":
+        manifest_path.unlink()
+    else:
+        manifest_path.write_text("{not-json", encoding="utf-8")
+
+    with TestClient(static_app(static_dir), base_url=BASE_URL) as client:
+        response = client.get("/assets/app-0123456789abcdef.js")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_vite_manifest_is_not_served_and_is_no_store(static_dir: Path) -> None:
+    with TestClient(static_app(static_dir), base_url=BASE_URL) as client:
+        response = client.get("/.vite/manifest.json")
+
+    assert response.status_code == 404
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_unknown_api_and_asset_like_paths_never_receive_spa_html(static_dir: Path) -> None:

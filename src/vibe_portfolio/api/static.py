@@ -8,7 +8,7 @@ from urllib.parse import unquote
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.types import Receive, Scope, Send
 
-_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}(?=\.)")
+_HASHED_ASSET = re.compile(r"^.+-[0-9a-f]{16}\.[A-Za-z0-9]+$")
 _MAX_MANIFEST_BYTES = 1_000_000
 
 
@@ -112,7 +112,7 @@ class SpaStaticApp:
             return _not_found()
         cache = (
             "public, max-age=31536000, immutable"
-            if relative in self.immutable_assets and _HASHED_ASSET.search(candidate.name)
+            if relative in self.immutable_assets and _HASHED_ASSET.fullmatch(candidate.name)
             else "no-store"
         )
         return FileResponse(candidate, headers={"Cache-Control": cache})

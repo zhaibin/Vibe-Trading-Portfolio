@@ -1130,7 +1130,25 @@ Build `App` with routes `/`, `/holdings`, `/settings`, minimal semantic page hea
 
 - [ ] **Step 4: Configure production build and coverage**
 
-Vite must proxy `/api` to `http://127.0.0.1:8765` only in development, overwrite the proxied request `Origin` with `http://127.0.0.1:8765`, and build to `../src/vibe_portfolio/web/dist` with `emptyOutDir: true`. Vitest must use jsdom, load `vitest.setup.ts`, and enforce 80% lines/functions/statements and 75% branches.
+Vite must proxy `/api` to `http://127.0.0.1:8765` only in development, overwrite the proxied request `Origin` with `http://127.0.0.1:8765`, and build to `../src/vibe_portfolio/web/dist` with `emptyOutDir: true`. Enable the authoritative Vite manifest and configure Rollup to emit the exact 16-character lowercase hexadecimal digest format enforced by the backend static classifier:
+
+```ts
+build: {
+  outDir: "../src/vibe_portfolio/web/dist",
+  emptyOutDir: true,
+  manifest: true,
+  rollupOptions: {
+    output: {
+      hashCharacters: "hex",
+      entryFileNames: "assets/[name]-[hash:16].js",
+      chunkFileNames: "assets/[name]-[hash:16].js",
+      assetFileNames: "assets/[name]-[hash:16][extname]",
+    },
+  },
+},
+```
+
+Vitest must use jsdom, load `vitest.setup.ts`, and enforce 80% lines/functions/statements and 75% branches.
 
 Ignore only generated/runtime paths:
 
