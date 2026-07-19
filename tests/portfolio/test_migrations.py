@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
+from vibe_portfolio.portfolio.database import _configuration
 from vibe_portfolio.portfolio.tables import QuoteRefreshRunRow
 
 
@@ -141,3 +143,16 @@ def test_quote_refresh_run_metadata_matches_migration_server_defaults() -> None:
         server_default = QuoteRefreshRunRow.__table__.c[column_name].server_default
         assert server_default is not None
         assert str(server_default.arg) == "0"
+
+
+def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Path) -> None:
+    root_config = Config("alembic.ini")
+    runtime_config = _configuration(tmp_path / "portfolio.db", 50)
+
+    root_script = ScriptDirectory.from_config(root_config)
+    runtime_script = ScriptDirectory.from_config(runtime_config)
+    assert root_script.dir == runtime_script.dir
+    revision = next(runtime_script.walk_revisions())
+    assert revision.revision == "20260719_0001"
+    assert revision.path is not None
+    assert "op.create_table" in Path(revision.path).read_text()

@@ -125,9 +125,9 @@ def _open_connection(path: Path, busy_timeout_ms: int) -> sqlite3.Connection:
     connection = sqlite3.connect(_database_uri(path), uri=True, timeout=busy_timeout_ms / 1000)
     try:
         _assert_safe_path(path)
+        connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         return connection
     except BaseException:
         connection.close()
@@ -259,9 +259,9 @@ def sqlite_async_url(path: Path) -> str:
 def enable_sqlite_pragmas(dbapi_connection: Any, _: object, *, busy_timeout_ms: int) -> None:
     cursor = dbapi_connection.cursor()
     try:
+        cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     finally:
         cursor.close()
 
@@ -280,7 +280,11 @@ class Database:
         try:
             validate_database_path(self.path)
             await asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms)
-            self.engine = create_async_engine(sqlite_async_url(self.path), pool_pre_ping=True)
+            self.engine = create_async_engine(
+                sqlite_async_url(self.path),
+                pool_pre_ping=True,
+                connect_args={"timeout": self.busy_timeout_ms / 1000},
+            )
             event.listen(
                 self.engine.sync_engine,
                 "connect",

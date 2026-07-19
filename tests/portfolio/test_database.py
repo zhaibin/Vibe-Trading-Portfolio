@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -171,8 +172,10 @@ async def test_database_start_maps_preflight_lock_to_busy(tmp_path: Path) -> Non
             "('held', 'Held', 'held', 'USD', NULL, 1, '2026-07-19T00:00:00+00:00', "
             "'2026-07-19T00:00:00+00:00', NULL)"
         )
+        started = time.monotonic()
         with pytest.raises(DatabaseBusyError, match="DATABASE_BUSY"):
             await Database(path, busy_timeout_ms=50).start()
+        assert time.monotonic() - started < 0.5
     finally:
         lock.rollback()
         lock.close()
