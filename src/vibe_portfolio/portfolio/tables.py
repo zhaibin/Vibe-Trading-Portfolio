@@ -38,6 +38,26 @@ class AccountRow(Base):
     archived_at: Mapped[datetime | None] = mapped_column(UtcIsoDateTime(), nullable=True)
 
 
+class AccountVersionRow(Base):
+    """Append-only account state used to reconstruct an exact historical API view."""
+
+    __tablename__ = "account_versions"
+    __table_args__ = (
+        CheckConstraint("length(name) BETWEEN 1 AND 80", name="ck_account_versions_name"),
+        CheckConstraint("currency IN ('CNY', 'HKD', 'USD')", name="ck_account_versions_currency"),
+        CheckConstraint("version >= 1", name="ck_account_versions_version"),
+    )
+
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    cash_balance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+    archived_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class InstrumentRow(Base):
     __tablename__ = "instruments"
     __table_args__ = (
@@ -182,7 +202,7 @@ class IdempotencyRow(Base):
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     state: Mapped[str] = mapped_column(String(9), nullable=False)
     resource_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    resource_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcIsoDateTime(), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UtcIsoDateTime(), nullable=False)

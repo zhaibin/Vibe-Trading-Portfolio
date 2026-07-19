@@ -1,6 +1,5 @@
 """Transactional persistence operations for portfolio resources."""
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -8,11 +7,11 @@ from typing import Final
 from uuid import uuid4
 
 from sqlalchemy import Select, exists, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vibe_portfolio.portfolio.schemas import AccountCreate, AccountPatch
-from vibe_portfolio.portfolio.tables import AccountRow, IdempotencyRow, PositionRow
+from vibe_portfolio.portfolio.tables import AccountRow, AccountVersionRow, IdempotencyRow, PositionRow
 
 IDEMPOTENCY_TTL: Final = timedelta(hours=24)
 
@@ -29,6 +28,11 @@ class RepositoryError(RuntimeError):
 class IdempotencyConflict(RepositoryError):
     def __init__(self) -> None:
         super().__init__("IDEMPOTENCY_CONFLICT")
+
+
+class ReplayUnavailable(RepositoryError):
+    def __init__(self) -> None:
+        super().__init__("PORTFOLIO_UNAVAILABLE")
 
 
 class DuplicateAccountName(RepositoryError):
@@ -68,46 +72,46 @@ class PortfolioRepository:
         self, session: AsyncSession, scope: str, key: str, request_hash: str, now: datetime
     ) -> IdempotencyClaim:
         key_hash = hash_idempotency_key(key)
-        row = await session.get(IdempotencyRow, (scope, key_hash))
-        if row is not None:
-            if row.expires_at <= now:
-                row.request_hash, row.state = request_hash, "pending"
-                row.resource_id = row.response_status = row.response_json = None
-                row.created_at, row.expires_at = now, now + IDEMPOTENCY_TTL
-                await session.flush()
-                return IdempotencyClaim(row=row, completed=False)
-            if row.request_hash != request_hash:
-                raise IdempotencyConflict()
-            else:
-                return IdempotencyClaim(row=row, completed=row.state == "completed")
-        row = IdempotencyRow(
-            scope=scope,
-            key_hash=key_hash,
-            request_hash=request_hash,
-            state="pending",
-            resource_id=None,
-            response_status=None,
-            response_json=None,
-            created_at=now,
-            expires_at=now + IDEMPOTENCY_TTL,
+        pending_values = {
+            "scope": scope,
+            "key_hash": key_hash,
+            "request_hash": request_hash,
+            "state": "pending",
+            "resource_id": None,
+            "resource_version": None,
+            "response_status": None,
+            "created_at": now,
+            "expires_at": now + IDEMPOTENCY_TTL,
+        }
+        inserted = await session.scalar(
+            sqlite_insert(IdempotencyRow)
+            .values(**pending_values)
+            .on_conflict_do_nothing(index_elements=[IdempotencyRow.scope, IdempotencyRow.key_hash])
+            .returning(IdempotencyRow.scope)
         )
-        try:
-            async with session.begin_nested():
-                session.add(row)
-                await session.flush()
-        except IntegrityError as error:
-            row = await session.get(IdempotencyRow, (scope, key_hash))
-            if row is None:
-                raise
-            if row.expires_at <= now:
-                row.request_hash, row.state = request_hash, "pending"
-                row.resource_id = row.response_status = row.response_json = None
-                row.created_at, row.expires_at = now, now + IDEMPOTENCY_TTL
-                await session.flush()
-                return IdempotencyClaim(row=row, completed=False)
-            if row.request_hash != request_hash:
-                raise IdempotencyConflict() from error
-            return IdempotencyClaim(row=row, completed=row.state == "completed")
+        if inserted is None:
+            reclaimed = await session.scalar(
+                update(IdempotencyRow)
+                .where(
+                    IdempotencyRow.scope == scope,
+                    IdempotencyRow.key_hash == key_hash,
+                    IdempotencyRow.expires_at <= now,
+                )
+                .values(**pending_values)
+                .returning(IdempotencyRow.scope)
+            )
+            if reclaimed is None:
+                row = await session.get(IdempotencyRow, (scope, key_hash), populate_existing=True)
+                if row is None:
+                    raise ReplayUnavailable()
+                if row.request_hash != request_hash:
+                    raise IdempotencyConflict()
+                if row.state != "completed":
+                    raise ReplayUnavailable()
+                return IdempotencyClaim(row=row, completed=True)
+        row = await session.get(IdempotencyRow, (scope, key_hash), populate_existing=True)
+        if row is None or row.state != "pending" or row.request_hash != request_hash:
+            raise ReplayUnavailable()
         return IdempotencyClaim(row=row, completed=False)
 
     async def complete_idempotency(
@@ -116,13 +120,49 @@ class PortfolioRepository:
         claim: IdempotencyClaim,
         account: AccountRow,
         status: int,
-        response: dict[str, object],
     ) -> None:
-        claim.row.state = "completed"
-        claim.row.resource_id = account.id
-        claim.row.response_status = status
-        claim.row.response_json = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        await session.flush()
+        completed = await session.scalar(
+            update(IdempotencyRow)
+            .where(
+                IdempotencyRow.scope == claim.row.scope,
+                IdempotencyRow.key_hash == claim.row.key_hash,
+                IdempotencyRow.request_hash == claim.row.request_hash,
+                IdempotencyRow.state == "pending",
+            )
+            .values(
+                state="completed",
+                resource_id=account.id,
+                resource_version=account.version,
+                response_status=status,
+            )
+            .returning(IdempotencyRow.scope)
+        )
+        if completed is None:
+            raise ReplayUnavailable()
+
+    async def record_account_version(self, session: AsyncSession, account: AccountRow) -> None:
+        recorded = await session.scalar(
+            sqlite_insert(AccountVersionRow)
+            .values(
+                account_id=account.id,
+                version=account.version,
+                name=account.name,
+                currency=account.currency,
+                cash_balance=None if account.cash_balance is None else format(account.cash_balance, "f"),
+                created_at=account.created_at.isoformat(),
+                updated_at=account.updated_at.isoformat(),
+                archived_at=None if account.archived_at is None else account.archived_at.isoformat(),
+            )
+            .on_conflict_do_nothing(index_elements=[AccountVersionRow.account_id, AccountVersionRow.version])
+            .returning(AccountVersionRow.account_id)
+        )
+        if recorded is None:
+            raise ReplayUnavailable()
+
+    async def account_version(
+        self, session: AsyncSession, account_id: str, version: int
+    ) -> AccountVersionRow | None:
+        return await session.get(AccountVersionRow, (account_id, version))
 
     async def account(self, session: AsyncSession, account_id: str) -> AccountRow | None:
         return await session.get(AccountRow, account_id)
@@ -130,24 +170,27 @@ class PortfolioRepository:
     async def create_account(
         self, session: AsyncSession, command: AccountCreate, normalized_name: str, now: datetime
     ) -> AccountRow:
-        duplicate = await session.scalar(
-            select(exists().where(AccountRow.normalized_name == normalized_name, AccountRow.archived_at.is_(None)))
+        account = await session.scalar(
+            sqlite_insert(AccountRow)
+            .values(
+                id=str(uuid4()),
+                name=command.name,
+                normalized_name=normalized_name,
+                currency=command.currency.value,
+                cash_balance=command.cash_balance,
+                version=1,
+                created_at=now,
+                updated_at=now,
+                archived_at=None,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[AccountRow.normalized_name],
+                index_where=AccountRow.archived_at.is_(None),
+            )
+            .returning(AccountRow)
         )
-        if duplicate:
+        if account is None:
             raise DuplicateAccountName()
-        account = AccountRow(
-            id=str(uuid4()),
-            name=command.name,
-            normalized_name=normalized_name,
-            currency=command.currency.value,
-            cash_balance=command.cash_balance,
-            version=1,
-            created_at=now,
-            updated_at=now,
-            archived_at=None,
-        )
-        session.add(account)
-        await session.flush()
         return account
 
     async def update_account(
@@ -163,6 +206,7 @@ class PortfolioRepository:
             raise AccountNotFound()
         if current.version != command.version:
             raise ConcurrentModification(current.version)
+        final_normalized_name = current.normalized_name if normalized_name is None else normalized_name
         if normalized_name is not None and normalized_name != current.normalized_name:
             duplicate = await session.scalar(
                 select(
@@ -188,7 +232,7 @@ class PortfolioRepository:
                 select(
                     exists().where(
                         AccountRow.id != account_id,
-                        AccountRow.normalized_name == current.normalized_name,
+                        AccountRow.normalized_name == final_normalized_name,
                         AccountRow.archived_at.is_(None),
                     )
                 )
@@ -203,23 +247,28 @@ class PortfolioRepository:
             values["normalized_name"] = normalized_name
         if "cash_balance" in command.model_fields_set:
             values["cash_balance"] = command.cash_balance
-        try:
-            async with session.begin_nested():
-                result = await session.execute(
-                    update(AccountRow)
-                    .where(AccountRow.id == account_id, AccountRow.version == command.version)
-                    .values(**values)
-                    .returning(AccountRow.id)
-                )
-        except IntegrityError as error:
-            if "normalized_name" in str(error):
-                raise DuplicateAccountName() from error
-            raise
+        result = await session.execute(
+            update(AccountRow)
+            .prefix_with("OR IGNORE", dialect="sqlite")
+            .where(AccountRow.id == account_id, AccountRow.version == command.version)
+            .values(**values)
+            .returning(AccountRow.id)
+        )
         if result.scalar_one_or_none() is None:
-            latest = await self.account(session, account_id)
-            raise ConcurrentModification(None if latest is None else latest.version)
-        await session.flush()
-        updated = await self.account(session, account_id)
+            if archived_at is None:
+                duplicate = await session.scalar(
+                    select(
+                        exists().where(
+                            AccountRow.id != account_id,
+                            AccountRow.normalized_name == final_normalized_name,
+                            AccountRow.archived_at.is_(None),
+                        )
+                    )
+                )
+                if duplicate:
+                    raise DuplicateAccountName()
+            raise ConcurrentModification(current.version)
+        updated = await session.get(AccountRow, account_id, populate_existing=True)
         assert updated is not None
         return updated
 

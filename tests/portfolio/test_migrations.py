@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -8,13 +9,13 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from vibe_portfolio.portfolio.database import _configuration
-from vibe_portfolio.portfolio.tables import QuoteRefreshRunRow
+from vibe_portfolio.portfolio.tables import AccountVersionRow, IdempotencyRow, QuoteRefreshRunRow
 
 
-def _upgrade_database(path: Path) -> None:
+def _upgrade_database(path: Path, revision: str = "head") -> None:
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
-    command.upgrade(config, "head")
+    command.upgrade(config, revision)
 
 
 def test_initial_migration_creates_all_snapshot_tables(tmp_path: Path) -> None:
@@ -32,6 +33,7 @@ def test_initial_migration_creates_all_snapshot_tables(tmp_path: Path) -> None:
         "quote_refresh_items",
         "instrument_candidates",
         "idempotency_records",
+        "account_versions",
     } <= tables
 
 
@@ -40,7 +42,7 @@ def test_initial_migration_has_revision_and_material_schema_behavior(tmp_path: P
     _upgrade_database(path)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0002",)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0003",)
         foreign_keys = connection.execute("PRAGMA foreign_key_list(positions)").fetchall()
         assert {foreign_key[2] for foreign_key in foreign_keys} == {"accounts", "instruments"}
         indexes = connection.execute("PRAGMA index_list(positions)").fetchall()
@@ -153,9 +155,89 @@ def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Pat
     runtime_script = ScriptDirectory.from_config(runtime_config)
     assert root_script.dir == runtime_script.dir
     revision = next(runtime_script.walk_revisions())
-    assert revision.revision == "20260719_0002"
+    assert revision.revision == "20260719_0003"
     assert revision.path is not None
-    assert "op.add_column" in Path(revision.path).read_text()
+    migration_source = Path(revision.path).read_text()
+    assert "account_versions" in migration_source
+    assert "response_json" in migration_source
+
+
+def test_privacy_migration_moves_valid_replay_state_to_history_and_drops_response_json(tmp_path: Path) -> None:
+    path = tmp_path / "portfolio.db"
+    _upgrade_database(path, "20260719_0002")
+    account_id = "11111111-1111-4111-8111-111111111111"
+    original = {
+        "id": account_id,
+        "name": "迁移前名称",
+        "currency": "CNY",
+        "cash_balance": "7.500000",
+        "version": 1,
+        "created_at": "2026-07-19T00:00:00Z",
+        "updated_at": "2026-07-19T00:00:00Z",
+        "archived_at": None,
+    }
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "insert into accounts values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                account_id,
+                "当前名称",
+                "当前名称",
+                "CNY",
+                "8.000000",
+                2,
+                "2026-07-19T00:00:00Z",
+                "2026-07-19T01:00:00Z",
+                None,
+            ),
+        )
+        connection.execute(
+            "insert into idempotency_records values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "POST:/api/v1/accounts",
+                "a" * 64,
+                "b" * 64,
+                "completed",
+                account_id,
+                201,
+                "2026-07-19T00:00:00Z",
+                "2026-07-20T00:00:00Z",
+                json.dumps(original, ensure_ascii=False),
+            ),
+        )
+        connection.commit()
+
+    _upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        idempotency_columns = {
+            row[1] for row in connection.execute("pragma table_info(idempotency_records)").fetchall()
+        }
+        histories = connection.execute(
+            "select version, name, cash_balance from account_versions where account_id = ? order by version",
+            (account_id,),
+        ).fetchall()
+        replay_metadata = connection.execute(
+            "select resource_id, resource_version, response_status from idempotency_records"
+        ).fetchone()
+
+    assert "response_json" not in idempotency_columns
+    assert "resource_version" in idempotency_columns
+    assert histories == [(1, "迁移前名称", "7.500000"), (2, "当前名称", "8.000000")]
+    assert replay_metadata == (account_id, 1, 201)
+
+
+def test_migrated_schema_matches_idempotency_and_account_history_orm_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "portfolio.db"
+    _upgrade_database(path)
+    with closing(sqlite3.connect(path)) as connection:
+        idempotency_columns = {
+            row[1] for row in connection.execute("pragma table_info(idempotency_records)").fetchall()
+        }
+        history_columns = {row[1] for row in connection.execute("pragma table_info(account_versions)").fetchall()}
+
+    assert idempotency_columns == set(IdempotencyRow.__table__.columns.keys())
+    assert history_columns == set(AccountVersionRow.__table__.columns.keys())
 
 
 def test_packaged_migration_tree_is_the_only_authoring_environment() -> None:
