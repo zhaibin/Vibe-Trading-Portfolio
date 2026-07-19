@@ -48,7 +48,7 @@ def test_initial_migration_has_revision_and_material_schema_behavior(tmp_path: P
     _upgrade_database(path)
     with closing(sqlite3.connect(path)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
-        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0005",)
+        assert connection.execute("select version_num from alembic_version").fetchone() == ("20260719_0006",)
         foreign_keys = connection.execute("PRAGMA foreign_key_list(positions)").fetchall()
         assert {foreign_key[2] for foreign_key in foreign_keys} == {"accounts", "instruments"}
         indexes = connection.execute("PRAGMA index_list(positions)").fetchall()
@@ -161,9 +161,10 @@ def test_root_and_runtime_use_the_same_explicit_migration_revision(tmp_path: Pat
     runtime_script = ScriptDirectory.from_config(runtime_config)
     assert root_script.dir == runtime_script.dir
     revision = next(runtime_script.walk_revisions())
-    assert revision.revision == "20260719_0005"
-    assert revision.path is not None
-    migration_source = Path(revision.path).read_text()
+    assert revision.revision == "20260719_0006"
+    lease_revision = runtime_script.get_revision("20260719_0005")
+    assert lease_revision is not None and lease_revision.path is not None
+    migration_source = Path(lease_revision.path).read_text()
     assert "uq_quote_refresh_runs_single_running" in migration_source
 
 
@@ -222,6 +223,97 @@ def test_refresh_lease_migration_backfills_running_rows_and_enforces_single_owne
                 ),
             )
 
+
+@pytest.mark.parametrize("start_revision", ["20260719_0004", "20260719_0005"])
+def test_legacy_unlinked_refresh_claim_cleanup_is_narrow_and_makes_key_reusable(
+    tmp_path: Path, start_revision: str
+) -> None:
+    path = tmp_path / f"portfolio-{start_revision}.db"
+    _upgrade_database(path, start_revision)
+    legacy_key = "1" * 64
+    linked_key = "2" * 64
+    other_scope_key = "3" * 64
+    insert_claim = (
+        "insert into idempotency_records "
+        "(scope, key_hash, request_hash, state, resource_id, resource_version, response_status, "
+        "created_at, expires_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    with closing(sqlite3.connect(path)) as connection:
+        values = (
+            "4" * 64,
+            "pending",
+            None,
+            None,
+            None,
+            "2026-07-19T00:00:00+00:00",
+            "2026-07-20T00:00:00+00:00",
+        )
+        connection.execute(insert_claim, ("market-data:refresh", legacy_key, *values))
+        connection.execute(
+            insert_claim,
+            ("market-data:refresh", linked_key, "5" * 64, "pending", "run-linked", None, None, *values[-2:]),
+        )
+        connection.execute(insert_claim, ("other:scope", other_scope_key, *values))
+        connection.commit()
+
+    _upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        rows = connection.execute(
+            "select scope, key_hash, resource_id from idempotency_records order by scope, key_hash"
+        ).fetchall()
+        assert rows == [
+            ("market-data:refresh", linked_key, "run-linked"),
+            ("other:scope", other_scope_key, None),
+        ]
+        connection.execute(
+            insert_claim,
+            ("market-data:refresh", legacy_key, "6" * 64, "pending", None, None, None, *values[-2:]),
+        )
+        connection.commit()
+
+
+def test_refresh_cleanup_migration_clears_only_terminal_scope_snapshots(tmp_path: Path) -> None:
+    path = tmp_path / "portfolio-scope-cleanup.db"
+    _upgrade_database(path, "20260719_0005")
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "insert into quote_refresh_runs "
+            "(id, scope_hash, status, started_at, finished_at, scope_json) values (?, ?, ?, ?, ?, ?)",
+            (
+                "terminal-run",
+                "7" * 64,
+                "completed",
+                "2026-07-19T00:00:00+00:00",
+                "2026-07-19T00:01:00+00:00",
+                '["instrument-terminal"]',
+            ),
+        )
+        connection.execute(
+            "insert into quote_refresh_runs "
+            "(id, scope_hash, status, started_at, owner_token, lease_expires_at, scope_json) "
+            "values (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "running-run",
+                "8" * 64,
+                "running",
+                "2026-07-19T00:02:00+00:00",
+                "owner-token",
+                "2026-07-19T00:04:00+00:00",
+                '["instrument-running"]',
+            ),
+        )
+        connection.commit()
+
+    _upgrade_database(path)
+
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute(
+            "select id, scope_json from quote_refresh_runs order by id"
+        ).fetchall() == [
+            ("running-run", '["instrument-running"]'),
+            ("terminal-run", None),
+        ]
 
 def test_privacy_migration_moves_valid_replay_state_to_history_and_drops_response_json(tmp_path: Path) -> None:
     path = tmp_path / "portfolio.db"

@@ -457,6 +457,7 @@ class PortfolioRepository:
                 unavailable_count=unavailable,
                 owner_token=None,
                 lease_expires_at=None,
+                scope_json=None,
                 terminal_error=reason,
             )
             .returning(QuoteRefreshRunRow.id)
@@ -536,6 +537,7 @@ class PortfolioRepository:
                 unavailable_count=counts["unavailable"],
                 owner_token=None,
                 lease_expires_at=None,
+                scope_json=None,
                 terminal_error=None if status != "failed" else "QUOTE_UNAVAILABLE",
             )
             .returning(QuoteRefreshRunRow.id)

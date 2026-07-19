@@ -22,6 +22,7 @@ from vibe_portfolio.portfolio.repository import PortfolioRepository, hash_idempo
 from vibe_portfolio.portfolio.tables import (
     AccountRow,
     IdempotencyRow,
+    InstrumentCandidateRow,
     InstrumentProviderSymbolRow,
     InstrumentRow,
     LatestQuoteRow,
@@ -142,6 +143,67 @@ async def seed_active(
     return ids
 
 
+async def seed_expired_retention(database: Database, instrument_id: UUID) -> tuple[str, tuple[str, str], str]:
+    candidate_id = str(uuid4())
+    old_run_id = str(uuid4())
+    key_hash = hash_idempotency_key("expired-retention-key")
+    async with database.session() as session, session.begin():
+        session.add(
+            InstrumentCandidateRow(
+                id=candidate_id,
+                canonical_symbol="OLD.US",
+                name="Old",
+                market="US",
+                currency="USD",
+                asset_type="equity",
+                provider="yahoo",
+                provider_symbols_json='[{"provider":"yahoo","symbol":"OLD"}]',
+                created_at=NOW - timedelta(minutes=20),
+                expires_at=NOW - timedelta(minutes=5),
+                consumed_at=None,
+            )
+        )
+        session.add(
+            QuoteRefreshRunRow(
+                id=old_run_id,
+                scope_hash="9" * 64,
+                status="failed",
+                started_at=NOW - timedelta(days=91, minutes=1),
+                finished_at=NOW - timedelta(days=91),
+                updated_count=0,
+                stale_count=0,
+                unavailable_count=1,
+                scope_json=None,
+                terminal_error="QUOTE_UNAVAILABLE",
+            )
+        )
+        session.add(
+            IdempotencyRow(
+                scope="expired:test",
+                key_hash=key_hash,
+                request_hash="8" * 64,
+                state="completed",
+                resource_id=None,
+                resource_version=None,
+                response_status=200,
+                created_at=NOW - timedelta(days=2),
+                expires_at=NOW - timedelta(days=1),
+            )
+        )
+        await session.flush()
+        session.add(
+            QuoteRefreshItemRow(
+                run_id=old_run_id,
+                instrument_id=str(instrument_id),
+                outcome="unavailable",
+                provider=None,
+                error_code="QUOTE_UNAVAILABLE",
+                created_at=NOW - timedelta(days=91),
+            )
+        )
+    return candidate_id, ("expired:test", key_hash), old_run_id
+
+
 async def test_fixed_routes_and_valid_primary_prevents_fallback(database: Database) -> None:
     await seed_active(
         database,
@@ -165,6 +227,9 @@ async def test_fixed_routes_and_valid_primary_prevents_fallback(database: Databa
     }
     assert set(yahoo.calls) == {("00700.HK",), ("DEMO.US",)}
     assert tencent.calls == []
+    async with database.session() as session:
+        run = await session.get(QuoteRefreshRunRow, str(result.run_id))
+    assert run is not None and run.scope_json is None
 
 
 async def test_invalid_primary_falls_back_only_for_that_instrument(database: Database) -> None:
@@ -244,6 +309,9 @@ async def test_all_failure_records_failed_run_and_idempotent_replay(database: Da
     assert first.status == "failed"
     assert replay == first
     assert yahoo.calls == [("DEMO.US",)]
+    async with database.session() as session:
+        run = await session.get(QuoteRefreshRunRow, str(first.run_id))
+    assert run is not None and run.scope_json is None
 
 
 async def test_concurrent_refresh_reports_existing_run(database: Database) -> None:
@@ -276,6 +344,7 @@ def test_registry_rejects_non_reviewed_or_duplicate_providers() -> None:
 
 async def test_total_operation_timeout_finishes_with_sanitized_unavailable_item(database: Database) -> None:
     ids = await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    candidate_id, expired_idempotency, old_run_id = await seed_expired_retention(database, ids[0])
     yahoo = FakeProvider("yahoo")
     yahoo.entered, yahoo.release = asyncio.Event(), asyncio.Event()
     service = MarketDataService(
@@ -288,8 +357,32 @@ async def test_total_operation_timeout_finishes_with_sanitized_unavailable_item(
     assert result.status == "failed"
     async with database.session() as session:
         item = await session.get(QuoteRefreshItemRow, (str(result.run_id), str(ids[0])))
+        run = await session.get(QuoteRefreshRunRow, str(result.run_id))
+        expired_candidate = await session.get(InstrumentCandidateRow, candidate_id)
+        expired_claim = await session.get(IdempotencyRow, expired_idempotency)
+        expired_item = await session.get(QuoteRefreshItemRow, (old_run_id, str(ids[0])))
     assert item is not None
     assert (item.outcome, item.error_code) == ("unavailable", "REFRESH_TIMEOUT")
+    assert run is not None and run.scope_json is None
+    assert expired_candidate is None and expired_claim is None and expired_item is None
+
+
+async def test_terminal_scope_is_not_retained_after_items_prune_while_latest_quote_keeps_run(
+    database: Database,
+) -> None:
+    ids = await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    result = await MarketDataService(database, registry(), now=lambda: NOW).refresh(
+        RefreshScope.all(), "refresh-privacy-prune"
+    )
+    async with database.session() as session, session.begin():
+        await PortfolioRepository().prune_expired(session, NOW + timedelta(days=91))
+    async with database.session() as session:
+        run = await session.get(QuoteRefreshRunRow, str(result.run_id))
+        quote = await session.get(LatestQuoteRow, str(ids[0]))
+        item = await session.get(QuoteRefreshItemRow, (str(result.run_id), str(ids[0])))
+    assert run is not None and run.scope_json is None
+    assert quote is not None and quote.refresh_run_id == str(result.run_id)
+    assert item is None
 
 
 class ConcurrencyTracker:
@@ -394,6 +487,7 @@ async def test_final_transaction_failure_rolls_back_quotes_and_startup_audit_fai
     async with database.session() as session:
         audited = await session.get(QuoteRefreshRunRow, running.id)
     assert audited is not None and audited.status == "failed"
+    assert audited.scope_json is None
 
 
 class SlowSelectionRepository(PortfolioRepository):
@@ -406,6 +500,18 @@ class SlowFinalRepository(PortfolioRepository):
     async def complete_refresh(self, *args: object, **kwargs: object) -> None:
         await asyncio.sleep(0.05)
         await super().complete_refresh(*args, **kwargs)  # type: ignore[arg-type]
+
+
+class CommitBeforeReturnRepository(PortfolioRepository):
+    def __init__(self) -> None:
+        self.committed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def link_refresh_idempotency(self, session, claim, run_id):  # type: ignore[no-untyped-def]
+        await super().link_refresh_idempotency(session, claim, run_id)
+        await session.commit()
+        self.committed.set()
+        await self.release.wait()
 
 
 async def test_whole_operation_deadline_covers_selection_without_durable_residue(database: Database) -> None:
@@ -444,6 +550,65 @@ async def test_whole_operation_deadline_terminalizes_an_admitted_final_write_tim
     ]
     replay = await service.refresh(RefreshScope.all(), "refresh-final-timeout")
     assert replay == result
+
+
+async def test_timeout_after_admission_commit_terminalizes_without_provider_work(database: Database) -> None:
+    await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    repository = CommitBeforeReturnRepository()
+    yahoo = FakeProvider("yahoo")
+    service = MarketDataService(
+        database,
+        registry(yahoo=yahoo),
+        repository=repository,
+        settings=Settings(market_operation_timeout_seconds=0.01),
+        now=lambda: NOW,
+    )
+
+    async def release_commit() -> None:
+        await repository.committed.wait()
+        await asyncio.sleep(0.03)
+        repository.release.set()
+
+    releaser = asyncio.create_task(release_commit())
+    result = await service.refresh(RefreshScope.all(), "refresh-admission-timeout")
+    await releaser
+    assert result.status == "failed"
+    assert yahoo.calls == []
+    details = await service.refresh_run(result.run_id)
+    assert details.run.terminal_error == "REFRESH_TIMEOUT"
+    assert details.run.scope_json is None
+    assert await service.refresh(RefreshScope.all(), "refresh-admission-timeout") == result
+    async with database.session() as session:
+        pending = await session.scalar(select(IdempotencyRow).where(IdempotencyRow.state == "pending"))
+        running = await session.scalar(select(QuoteRefreshRunRow).where(QuoteRefreshRunRow.status == "running"))
+    assert pending is None and running is None
+
+
+async def test_cancellation_after_admission_commit_preserves_cancellation_and_exact_replay(
+    database: Database,
+) -> None:
+    await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    repository = CommitBeforeReturnRepository()
+    yahoo = FakeProvider("yahoo")
+    service = MarketDataService(database, registry(yahoo=yahoo), repository=repository, now=lambda: NOW)
+    active = asyncio.create_task(service.refresh(RefreshScope.all(), "refresh-admission-cancel"))
+    await repository.committed.wait()
+    active.cancel("original admission cancellation")
+    await asyncio.sleep(0)
+    try:
+        assert not active.done()
+    finally:
+        repository.release.set()
+    with pytest.raises(asyncio.CancelledError, match="original admission cancellation"):
+        await active
+    assert yahoo.calls == []
+    async with database.session() as session:
+        run = await session.scalar(select(QuoteRefreshRunRow))
+        pending = await session.scalar(select(IdempotencyRow).where(IdempotencyRow.state == "pending"))
+    assert run is not None and run.status == "failed" and run.terminal_error == "REFRESH_CANCELLED"
+    assert run.scope_json is None and pending is None
+    replay = await service.refresh(RefreshScope.all(), "refresh-admission-cancel")
+    assert replay.run_id == UUID(run.id) and replay.status == "failed"
 
 
 class AdmissionBarrier:
@@ -585,6 +750,7 @@ async def test_expired_lease_recovery_terminalizes_items_and_idempotency_for_exa
     details = await service.refresh_run(UUID(run_id))
     assert details.run.status == "failed"
     assert details.run.terminal_error == "REFRESH_ABANDONED"
+    assert details.run.scope_json is None
     assert [(item.instrument_id, item.outcome, item.error_code) for item in details.items] == [
         (str(ids[0]), "unavailable", "REFRESH_ABANDONED")
     ]
@@ -597,6 +763,7 @@ async def test_external_cancellation_terminalizes_run_items_and_idempotency_befo
     database: Database,
 ) -> None:
     ids = await seed_active(database, [("DEMO.US", Market.US, Currency.USD, {"yahoo": "DEMO"})])
+    candidate_id, expired_idempotency, old_run_id = await seed_expired_retention(database, ids[0])
     yahoo = FakeProvider("yahoo")
     yahoo.entered, yahoo.release = asyncio.Event(), asyncio.Event()
     service = MarketDataService(database, registry(yahoo=yahoo), now=lambda: NOW)
@@ -606,11 +773,14 @@ async def test_external_cancellation_terminalizes_run_items_and_idempotency_befo
     with pytest.raises(asyncio.CancelledError):
         await active
     async with database.session() as session:
-        run = await session.scalar(select(QuoteRefreshRunRow))
+        run = await session.scalar(
+            select(QuoteRefreshRunRow).where(QuoteRefreshRunRow.terminal_error == "REFRESH_CANCELLED")
+        )
         pending = await session.scalar(
             select(IdempotencyRow).where(IdempotencyRow.state == "pending")
         )
     assert run is not None and run.status == "failed" and run.terminal_error == "REFRESH_CANCELLED"
+    assert run.scope_json is None
     assert run.finished_at == NOW
     assert pending is None
     details = await service.refresh_run(UUID(run.id))
@@ -620,3 +790,7 @@ async def test_external_cancellation_terminalizes_run_items_and_idempotency_befo
     replay = await service.refresh(RefreshScope.all(), "refresh-cancelled")
     assert replay.run_id == UUID(run.id) and replay.status == "failed"
     assert yahoo.calls == [("DEMO.US",)]
+    async with database.session() as session:
+        assert await session.get(InstrumentCandidateRow, candidate_id) is None
+        assert await session.get(IdempotencyRow, expired_idempotency) is None
+        assert await session.get(QuoteRefreshItemRow, (old_run_id, str(ids[0]))) is None

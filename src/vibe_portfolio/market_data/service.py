@@ -33,6 +33,7 @@ from vibe_portfolio.portfolio.database import Database
 from vibe_portfolio.portfolio.domain import AssetType, Currency, DomainValidationError, Market, canonical_symbol
 from vibe_portfolio.portfolio.repository import (
     CandidateInput,
+    IdempotencyClaim,
     PortfolioRepository,
     RefreshInstrumentRecord,
     RefreshItemInput,
@@ -108,6 +109,13 @@ class _Outcome:
     provider: str | None
     error_code: str | None
     quote: ProviderQuote | None
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionOutcome:
+    claim: IdempotencyClaim | None
+    conflict_id: UUID | None
+    raced_replay: RefreshResult | None
 
 
 class ProviderRegistry:
@@ -372,10 +380,12 @@ class MarketDataService:
 
     async def refresh(self, scope: RefreshScope, idempotency_key: str) -> RefreshResult:
         admitted: list[tuple[str, str]] = []
+        admission_tasks: list[asyncio.Task[_AdmissionOutcome]] = []
         try:
             async with asyncio.timeout(self._settings.market_operation_timeout_seconds):
-                return await self._execute_refresh(scope, idempotency_key, admitted)
+                return await self._execute_refresh(scope, idempotency_key, admitted, admission_tasks)
         except TimeoutError:
+            await self._settle_admission(admission_tasks)
             if not admitted:
                 raise RefreshOperationTimeout("QUOTE_UNAVAILABLE") from None
             run_id, owner_token = admitted[0]
@@ -393,6 +403,7 @@ class MarketDataService:
                 raise RefreshOperationTimeout("QUOTE_UNAVAILABLE") from None
             return replay
         except asyncio.CancelledError:
+            await self._settle_admission(admission_tasks)
             if admitted:
                 await self._shield_terminalize(*admitted[0], "REFRESH_CANCELLED")
             raise
@@ -402,6 +413,7 @@ class MarketDataService:
         scope: RefreshScope,
         idempotency_key: str,
         admitted: list[tuple[str, str]],
+        admission_tasks: list[asyncio.Task[_AdmissionOutcome]],
     ) -> RefreshResult:
         if self._registry is None:
             raise RuntimeError("quote refresh requires the fixed provider registry")
@@ -424,9 +436,65 @@ class MarketDataService:
         scope_ids = sorted(record.instrument.id for record in records)
         scope_json = json.dumps(scope_ids, separators=(",", ":"))
         scope_hash = sha256(scope_json.encode()).hexdigest()
+        admitted.append((run_id, owner_token))
+        admission_task = asyncio.create_task(
+            self._admit_refresh(
+                run_id=run_id,
+                owner_token=owner_token,
+                scope_hash=scope_hash,
+                scope_json=scope_json,
+                started_at=started_at,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+        )
+        admission_tasks.append(admission_task)
+        admission = await asyncio.shield(admission_task)
+        if admission.raced_replay is not None:
+            return admission.raced_replay
+        if admission.conflict_id is not None:
+            raise RefreshInProgress(admission.conflict_id)
+        claim = admission.claim
+        if claim is None:
+            raise RefreshInProgress(await self._running_id())
+        outcomes = await self._fetch_all(records)
+        status = _terminal_status(outcomes)
+        finished_at = self._aware_now()
+        items = [_item(outcome) for outcome in outcomes]
+        async with self._database.session() as session, session.begin():
+            await self._repository.complete_refresh(
+                session,
+                run_id=run_id,
+                status=status,
+                items=items,
+                finished_at=finished_at,
+                claim=claim,
+                owner_token=owner_token,
+            )
+            await self._repository.prune_expired(session, finished_at)
+        public_status: Literal["succeeded", "partial", "failed"] = "succeeded" if status == "completed" else status
+        return RefreshResult(
+            run_id=UUID(run_id),
+            status=public_status,
+            updated=sum(item.outcome == "updated" for item in outcomes),
+            stale=sum(item.outcome == "stale" for item in outcomes),
+            unavailable=sum(item.outcome == "unavailable" for item in outcomes),
+        )
+
+    async def _admit_refresh(
+        self,
+        *,
+        run_id: str,
+        owner_token: str,
+        scope_hash: str,
+        scope_json: str,
+        started_at: datetime,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> _AdmissionOutcome:
         conflict_id: UUID | None = None
         raced_replay: RefreshResult | None = None
-        claim = None
+        claim: IdempotencyClaim | None = None
         async with self._database.session() as session, session.begin():
             created = await self._repository.create_refresh_run(
                 session,
@@ -453,36 +521,7 @@ class MarketDataService:
                     await session.delete(inserted)
                 else:
                     await self._repository.link_refresh_idempotency(session, claim, run_id)
-        if raced_replay is not None:
-            return raced_replay
-        if conflict_id is not None:
-            raise RefreshInProgress(conflict_id)
-        if claim is None:
-            raise RefreshInProgress(await self._running_id())
-        admitted.append((run_id, owner_token))
-        outcomes = await self._fetch_all(records)
-        status = _terminal_status(outcomes)
-        finished_at = self._aware_now()
-        items = [_item(outcome) for outcome in outcomes]
-        async with self._database.session() as session, session.begin():
-            await self._repository.complete_refresh(
-                session,
-                run_id=run_id,
-                status=status,
-                items=items,
-                finished_at=finished_at,
-                claim=claim,
-                owner_token=owner_token,
-            )
-            await self._repository.prune_expired(session, finished_at)
-        public_status: Literal["succeeded", "partial", "failed"] = "succeeded" if status == "completed" else status
-        return RefreshResult(
-            run_id=UUID(run_id),
-            status=public_status,
-            updated=sum(item.outcome == "updated" for item in outcomes),
-            stale=sum(item.outcome == "stale" for item in outcomes),
-            unavailable=sum(item.outcome == "unavailable" for item in outcomes),
-        )
+        return _AdmissionOutcome(claim=claim, conflict_id=conflict_id, raced_replay=raced_replay)
 
     async def refresh_run(self, run_id: UUID) -> RefreshRunDetails:
         async with self._database.session() as session:
@@ -524,13 +563,15 @@ class MarketDataService:
         self, run_id: str, owner_token: str, reason: str, finished_at: datetime
     ) -> None:
         async with self._database.session() as session, session.begin():
-            await self._repository.terminalize_refresh(
+            terminalized = await self._repository.terminalize_refresh(
                 session,
                 run_id=run_id,
                 owner_token=owner_token,
                 reason=reason,
                 finished_at=finished_at,
             )
+            if terminalized:
+                await self._repository.prune_expired(session, finished_at)
 
     async def _shield_terminalize(self, run_id: str, owner_token: str, reason: str) -> None:
         cleanup = asyncio.create_task(self._terminalize(run_id, owner_token, reason, self._aware_now()))
@@ -540,6 +581,18 @@ class MarketDataService:
             except asyncio.CancelledError:
                 continue
         cleanup.result()
+
+    async def _settle_admission(self, tasks: Sequence[asyncio.Task[_AdmissionOutcome]]) -> None:
+        for task in tasks:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            if task.done() and not task.cancelled():
+                task.exception()
 
     async def _fetch_all(self, records: Sequence[RefreshInstrumentRecord]) -> list[_Outcome]:
         if not records:
