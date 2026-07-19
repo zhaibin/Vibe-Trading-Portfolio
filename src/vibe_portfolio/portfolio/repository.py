@@ -4,11 +4,12 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from typing import Final, Protocol
 from uuid import uuid4
 
-from sqlalchemy import Select, exists, select, update
+from sqlalchemy import Select, delete, exists, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,9 @@ from vibe_portfolio.portfolio.tables import (
 
 IDEMPOTENCY_TTL: Final = timedelta(hours=24)
 CANDIDATE_TTL: Final = timedelta(minutes=15)
+REFRESH_DETAIL_TTL: Final = timedelta(days=90)
+REFRESH_RUN_TTL: Final = timedelta(days=365)
+PRUNE_LIMIT: Final = 1_000
 
 
 class RepositoryError(RuntimeError):
@@ -112,6 +116,25 @@ class SummaryRecords:
     positions: list[PositionRow]
     quotes: dict[str, LatestQuoteRow]
     latest_attempts: dict[str, QuoteRefreshItemRow]
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshInstrumentRecord:
+    instrument: InstrumentRow
+    mappings: dict[str, str]
+    has_quote: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshItemInput:
+    instrument_id: str
+    outcome: str
+    provider: str | None
+    error_code: str | None
+    price: Decimal | None = None
+    currency: str | None = None
+    provider_symbol: str | None = None
+    as_of: datetime | None = None
 
 
 def hash_idempotency_key(key: str) -> str:
@@ -233,6 +256,208 @@ class PortfolioRepository:
         )
         if completed is None:
             raise ReplayUnavailable()
+
+    async def completed_idempotency(
+        self, session: AsyncSession, scope: str, key: str, request_hash: str, now: datetime
+    ) -> IdempotencyRow | None:
+        row = await session.get(IdempotencyRow, (scope, hash_idempotency_key(key)))
+        if row is None or row.expires_at <= now:
+            return None
+        if row.request_hash != request_hash:
+            raise IdempotencyConflict()
+        return row if row.state == "completed" else None
+
+    async def active_refresh_instruments(
+        self, session: AsyncSession, instrument_ids: Sequence[str] | None
+    ) -> list[RefreshInstrumentRecord]:
+        statement = (
+            select(InstrumentRow)
+            .join(PositionRow, PositionRow.instrument_id == InstrumentRow.id)
+            .join(AccountRow, AccountRow.id == PositionRow.account_id)
+            .where(PositionRow.archived_at.is_(None), AccountRow.archived_at.is_(None))
+            .distinct()
+            .order_by(InstrumentRow.id)
+        )
+        if instrument_ids is not None:
+            statement = statement.where(InstrumentRow.id.in_(instrument_ids))
+        instruments = list((await session.scalars(statement)).all())
+        ids = [instrument.id for instrument in instruments]
+        if not ids:
+            return []
+        mapping_rows = (
+            await session.scalars(
+                select(InstrumentProviderSymbolRow).where(InstrumentProviderSymbolRow.instrument_id.in_(ids))
+            )
+        ).all()
+        mappings: dict[str, dict[str, str]] = {instrument_id: {} for instrument_id in ids}
+        for mapping in mapping_rows:
+            mappings[mapping.instrument_id][mapping.provider] = mapping.provider_symbol
+        quoted = set(
+            await session.scalars(select(LatestQuoteRow.instrument_id).where(LatestQuoteRow.instrument_id.in_(ids)))
+        )
+        return [
+            RefreshInstrumentRecord(
+                instrument=instrument,
+                mappings=mappings[instrument.id],
+                has_quote=instrument.id in quoted,
+            )
+            for instrument in instruments
+        ]
+
+    async def running_refresh(self, session: AsyncSession) -> QuoteRefreshRunRow | None:
+        run: QuoteRefreshRunRow | None = await session.scalar(
+            select(QuoteRefreshRunRow)
+            .where(QuoteRefreshRunRow.status == "running")
+            .order_by(QuoteRefreshRunRow.started_at.desc())
+            .limit(1)
+        )
+        return run
+
+    async def refresh_run(self, session: AsyncSession, run_id: str) -> QuoteRefreshRunRow | None:
+        return await session.get(QuoteRefreshRunRow, run_id)
+
+    async def refresh_items(self, session: AsyncSession, run_id: str) -> list[QuoteRefreshItemRow]:
+        return list(
+            (
+                await session.scalars(
+                    select(QuoteRefreshItemRow)
+                    .where(QuoteRefreshItemRow.run_id == run_id)
+                    .order_by(QuoteRefreshItemRow.instrument_id)
+                )
+            ).all()
+        )
+
+    async def abandon_running_refreshes(self, session: AsyncSession, now: datetime) -> None:
+        run_ids = list(
+            await session.scalars(select(QuoteRefreshRunRow.id).where(QuoteRefreshRunRow.status == "running"))
+        )
+        if not run_ids:
+            return
+        await session.execute(
+            update(QuoteRefreshRunRow)
+            .where(QuoteRefreshRunRow.id.in_(run_ids), QuoteRefreshRunRow.status == "running")
+            .values(status="failed", finished_at=now)
+        )
+        await session.execute(
+            update(QuoteRefreshItemRow)
+            .where(QuoteRefreshItemRow.run_id.in_(run_ids))
+            .values(error_code="REFRESH_ABANDONED")
+        )
+
+    async def complete_refresh(
+        self,
+        session: AsyncSession,
+        *,
+        run_id: str,
+        status: str,
+        items: Sequence[RefreshItemInput],
+        finished_at: datetime,
+        claim: IdempotencyClaim,
+    ) -> None:
+        counts = {"updated": 0, "stale": 0, "unavailable": 0}
+        for item in items:
+            counts[item.outcome] += 1
+            session.add(
+                QuoteRefreshItemRow(
+                    run_id=run_id,
+                    instrument_id=item.instrument_id,
+                    outcome=item.outcome,
+                    provider=item.provider,
+                    error_code=item.error_code,
+                    created_at=finished_at,
+                )
+            )
+            if item.outcome == "updated":
+                assert None not in (item.price, item.currency, item.provider, item.provider_symbol, item.as_of)
+                await session.execute(
+                    sqlite_insert(LatestQuoteRow)
+                    .values(
+                        instrument_id=item.instrument_id,
+                        price=item.price,
+                        currency=item.currency,
+                        provider=item.provider,
+                        provider_symbol=item.provider_symbol,
+                        as_of=item.as_of,
+                        fetched_at=finished_at,
+                        refresh_run_id=run_id,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[LatestQuoteRow.instrument_id],
+                        set_={
+                            "price": item.price,
+                            "currency": item.currency,
+                            "provider": item.provider,
+                            "provider_symbol": item.provider_symbol,
+                            "as_of": item.as_of,
+                            "fetched_at": finished_at,
+                            "refresh_run_id": run_id,
+                        },
+                    )
+                )
+        completed = await session.scalar(
+            update(QuoteRefreshRunRow)
+            .where(QuoteRefreshRunRow.id == run_id, QuoteRefreshRunRow.status == "running")
+            .values(
+                status=status,
+                finished_at=finished_at,
+                updated_count=counts["updated"],
+                stale_count=counts["stale"],
+                unavailable_count=counts["unavailable"],
+            )
+            .returning(QuoteRefreshRunRow.id)
+        )
+        if completed is None:
+            raise ReplayUnavailable()
+        await self.complete_resource_idempotency(
+            session,
+            claim,
+            resource_id=run_id,
+            resource_version=1,
+            status=502 if status == "failed" else 200,
+        )
+
+    async def prune_expired(self, session: AsyncSession, now: datetime, limit: int = PRUNE_LIMIT) -> int:
+        remaining = min(max(limit, 0), PRUNE_LIMIT)
+        deleted = 0
+        statements = (
+            (InstrumentCandidateRow, InstrumentCandidateRow.id, InstrumentCandidateRow.expires_at <= now),
+            (IdempotencyRow, (IdempotencyRow.scope, IdempotencyRow.key_hash), IdempotencyRow.expires_at <= now),
+            (
+                QuoteRefreshItemRow,
+                (QuoteRefreshItemRow.run_id, QuoteRefreshItemRow.instrument_id),
+                QuoteRefreshItemRow.created_at <= now - REFRESH_DETAIL_TTL,
+            ),
+        )
+        for model, key, predicate in statements:
+            if remaining == 0:
+                break
+            if isinstance(key, tuple):
+                rows = list((await session.execute(select(*key).where(predicate).limit(remaining))).all())
+                for values in rows:
+                    await session.execute(
+                        delete(model).where(*(column == value for column, value in zip(key, values, strict=True)))
+                    )
+            else:
+                rows = list(await session.scalars(select(key).where(predicate).limit(remaining)))
+                if rows:
+                    await session.execute(delete(model).where(key.in_(rows)))
+            deleted += len(rows)
+            remaining -= len(rows)
+        if remaining:
+            run_ids = list(
+                await session.scalars(
+                    select(QuoteRefreshRunRow.id)
+                    .where(
+                        QuoteRefreshRunRow.finished_at <= now - REFRESH_RUN_TTL,
+                        ~exists().where(LatestQuoteRow.refresh_run_id == QuoteRefreshRunRow.id),
+                    )
+                    .limit(remaining)
+                )
+            )
+            if run_ids:
+                await session.execute(delete(QuoteRefreshRunRow).where(QuoteRefreshRunRow.id.in_(run_ids)))
+            deleted += len(run_ids)
+        return deleted
 
     async def record_account_version(self, session: AsyncSession, account: AccountRow) -> None:
         recorded = await session.scalar(

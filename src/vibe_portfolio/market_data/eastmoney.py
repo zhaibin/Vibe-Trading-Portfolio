@@ -2,6 +2,8 @@
 
 import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import NoReturn
 from urllib.parse import urlencode
 
@@ -13,10 +15,13 @@ from vibe_portfolio.market_data.models import (
     ProviderInstrument,
     ProviderQuote,
     ProviderSymbol,
+    validate_quote,
 )
 from vibe_portfolio.portfolio.domain import AssetType, Currency, DomainValidationError, Market, canonical_symbol
 
 _SEARCH_ENDPOINT = "https://searchapi.eastmoney.com/api/suggest/get"
+_QUOTE_ENDPOINT = "https://push2.eastmoney.com/api/qt/stock/get"
+_QUOTE_FIELDS = "f43,f57,f58,f59,f86"
 _US_MARKET_IDS = frozenset({"105", "106", "107"})
 _REVIEWED_MARKET_IDS = frozenset({"0", "1", "105", "106", "107", "116"})
 _MAX_SEARCH_ITEMS = 25
@@ -30,6 +35,10 @@ class _MalformedItem(ValueError):
 
 def _invalid_response() -> NoReturn:
     raise ProviderFailure(ProviderErrorCode.SEARCH_RESPONSE_INVALID) from None
+
+
+def _invalid_quote() -> NoReturn:
+    raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID) from None
 
 
 def _text(row: dict[str, object], key: str) -> str:
@@ -156,4 +165,77 @@ class EastmoneySearchProvider:
         return candidates[:limit]
 
     async def fetch_quotes(self, instruments: Sequence[ProviderInstrument]) -> list[ProviderQuote]:
-        return []
+        quotes: list[ProviderQuote] = []
+        for instrument in instruments:
+            parameters = urlencode({"secid": instrument.provider_symbol, "fields": _QUOTE_FIELDS})
+            payload = await self._http.get_json(f"{_QUOTE_ENDPOINT}?{parameters}")
+            if type(payload) is not dict:
+                _invalid_quote()
+            data = payload.get("data")
+            if data is None:
+                continue
+            if type(data) is not dict:
+                _invalid_quote()
+            quotes.append(_quote(data, instrument))
+        return quotes
+
+
+def _quote(data: dict[str, object], instrument: ProviderInstrument) -> ProviderQuote:
+    market_id, separator, code = instrument.provider_symbol.partition(".")
+    expected_ids = {
+        Market.CN_SH: frozenset({"1"}),
+        Market.CN_SZ: frozenset({"0"}),
+        Market.CN_BJ: frozenset({"0"}),
+        Market.HK: frozenset({"116"}),
+        Market.US: _US_MARKET_IDS,
+    }.get(instrument.market, frozenset())
+    expected_currency = {
+        Market.CN_SH: Currency.CNY,
+        Market.CN_SZ: Currency.CNY,
+        Market.CN_BJ: Currency.CNY,
+        Market.HK: Currency.HKD,
+        Market.US: Currency.USD,
+    }.get(instrument.market)
+    raw_price = data.get("f43")
+    raw_precision = data.get("f59")
+    raw_timestamp = data.get("f86")
+    raw_code = data.get("f57")
+    raw_name = data.get("f58")
+    try:
+        if (
+            separator != "."
+            or market_id not in expected_ids
+            or expected_currency is None
+            or instrument.currency is not expected_currency
+            or type(raw_code) is not str
+            or raw_code != code
+            or type(raw_name) is not str
+            or not raw_name.strip()
+            or isinstance(raw_precision, bool)
+            or not isinstance(raw_precision, int)
+            or not 0 <= raw_precision <= 6
+            or isinstance(raw_timestamp, bool)
+            or not isinstance(raw_timestamp, int)
+            or isinstance(raw_price, bool)
+            or not isinstance(raw_price, (int, str, Decimal))
+        ):
+            _invalid_quote()
+        if canonical_symbol(code, instrument.market) != instrument.canonical_symbol:
+            _invalid_quote()
+        price = Decimal(str(raw_price)).scaleb(-raw_precision)
+        if not price.is_finite() or price <= 0:
+            _invalid_quote()
+        as_of = datetime.fromtimestamp(raw_timestamp, UTC)
+    except ProviderFailure:
+        raise
+    except (DomainValidationError, InvalidOperation, OSError, OverflowError, TypeError, ValueError):
+        _invalid_quote()
+    quote = ProviderQuote(
+        canonical_symbol=instrument.canonical_symbol,
+        provider_symbol=instrument.provider_symbol,
+        price=price,
+        currency=instrument.currency,
+        as_of=as_of,
+        provider="eastmoney",
+    )
+    return validate_quote(quote, instrument, datetime.now(UTC))

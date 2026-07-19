@@ -1,4 +1,6 @@
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -8,10 +10,11 @@ import pytest
 import vibe_portfolio.market_data.eastmoney as eastmoney_module
 from vibe_portfolio.market_data.eastmoney import EastmoneySearchProvider
 from vibe_portfolio.market_data.http import BoundedProviderHttp
-from vibe_portfolio.market_data.models import ProviderErrorCode, ProviderFailure
+from vibe_portfolio.market_data.models import ProviderErrorCode, ProviderFailure, ProviderInstrument
 from vibe_portfolio.portfolio.domain import AssetType, Currency, Market
 
 FIXTURE = Path(__file__).parent / "fixtures" / "eastmoney_search.json"
+QUOTE_FIXTURE = Path(__file__).parent / "fixtures" / "eastmoney_quote.json"
 
 
 async def test_eastmoney_maps_only_reviewed_markets_and_equity_types() -> None:
@@ -150,3 +153,74 @@ async def test_eastmoney_rejects_unbounded_requests_before_io(query: str, limit:
     async with BoundedProviderHttp(allowed_hosts={"searchapi.eastmoney.com"}, transport=transport) as http:
         with pytest.raises(ValueError):
             await EastmoneySearchProvider(http).search(query, limit=limit)
+
+
+async def test_eastmoney_fetches_exact_decimal_and_provider_timestamp() -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+
+    instrument = ProviderInstrument(
+        canonical_symbol="600000.SH",
+        provider_symbol="1.600000",
+        market=Market.CN_SH,
+        currency=Currency.CNY,
+        asset_type=AssetType.EQUITY,
+    )
+    async with BoundedProviderHttp(
+        allowed_hosts={"push2.eastmoney.com"}, transport=httpx.MockTransport(handler)
+    ) as http:
+        quotes = await EastmoneySearchProvider(http).fetch_quotes([instrument])
+
+    assert quotes[0].price == Decimal("12.3456")
+    assert quotes[0].as_of == datetime.fromtimestamp(payload["data"]["f86"], UTC)
+    assert quotes[0].currency is Currency.CNY
+    assert quotes[0].provider == "eastmoney"
+    assert requests[0].url.path == "/api/qt/stock/get"
+    assert parse_qs(requests[0].url.query.decode()) == {
+        "secid": ["1.600000"],
+        "fields": ["f43,f57,f58,f59,f86"],
+    }
+
+
+@pytest.mark.parametrize("data", [None, {}, {"f43": "NaN", "f57": "600000", "f58": "Demo", "f59": 2, "f86": 1}])
+async def test_eastmoney_quote_rejects_malformed_payloads(data: object) -> None:
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json={"data": data}, headers={"content-type": "application/json"})
+    )
+    instrument = ProviderInstrument(
+        canonical_symbol="600000.SH",
+        provider_symbol="1.600000",
+        market=Market.CN_SH,
+        currency=Currency.CNY,
+        asset_type=AssetType.EQUITY,
+    )
+    async with BoundedProviderHttp(allowed_hosts={"push2.eastmoney.com"}, transport=transport) as http:
+        if data is None:
+            assert await EastmoneySearchProvider(http).fetch_quotes([instrument]) == []
+        else:
+            with pytest.raises(ProviderFailure) as raised:
+                await EastmoneySearchProvider(http).fetch_quotes([instrument])
+            assert raised.value.code is ProviderErrorCode.RESPONSE_INVALID
+
+
+async def test_eastmoney_quote_rejects_far_future_provider_timestamp() -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+    payload["data"]["f86"] = 4_102_444_800
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+    )
+    instrument = ProviderInstrument(
+        canonical_symbol="600000.SH",
+        provider_symbol="1.600000",
+        market=Market.CN_SH,
+        currency=Currency.CNY,
+        asset_type=AssetType.EQUITY,
+    )
+    async with BoundedProviderHttp(allowed_hosts={"push2.eastmoney.com"}, transport=transport) as http:
+        with pytest.raises(ProviderFailure) as raised:
+            await EastmoneySearchProvider(http).fetch_quotes([instrument])
+    assert raised.value.code is ProviderErrorCode.RESPONSE_INVALID

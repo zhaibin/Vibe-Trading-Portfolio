@@ -1,0 +1,17 @@
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "USD",
+          "symbol": "DEMO",
+          "exchangeName": "NYQ",
+          "instrumentType": "EQUITY",
+          "regularMarketPrice": 123.456789,
+          "regularMarketTime": 1784444400
+        }
+      }
+    ],
+    "error": null
+  }
+}

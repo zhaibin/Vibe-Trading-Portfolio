@@ -1,4 +1,6 @@
 import json
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -7,11 +9,12 @@ import pytest
 
 import vibe_portfolio.market_data.yahoo as yahoo_module
 from vibe_portfolio.market_data.http import BoundedProviderHttp
-from vibe_portfolio.market_data.models import ProviderErrorCode, ProviderFailure
+from vibe_portfolio.market_data.models import ProviderErrorCode, ProviderFailure, ProviderInstrument
 from vibe_portfolio.market_data.yahoo import YahooSearchProvider
 from vibe_portfolio.portfolio.domain import AssetType, Currency, Market
 
 FIXTURE = Path(__file__).parent / "fixtures" / "yahoo_search.json"
+QUOTE_FIXTURE = Path(__file__).parent / "fixtures" / "yahoo_chart.json"
 
 
 async def test_yahoo_normalizes_bare_us_and_four_digit_hk_and_filters_types() -> None:
@@ -133,3 +136,73 @@ async def test_yahoo_rejects_unbounded_requests_before_io(query: str, limit: int
     async with BoundedProviderHttp(allowed_hosts={"query2.finance.yahoo.com"}, transport=transport) as http:
         with pytest.raises(ValueError):
             await YahooSearchProvider(http).search(query, limit=limit)
+
+
+async def test_yahoo_fetches_exact_decimal_currency_and_provider_timestamp() -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+
+    instrument = ProviderInstrument(
+        canonical_symbol="DEMO.US",
+        provider_symbol="DEMO",
+        market=Market.US,
+        currency=Currency.USD,
+        asset_type=AssetType.EQUITY,
+    )
+    async with BoundedProviderHttp(
+        allowed_hosts={"query1.finance.yahoo.com"}, transport=httpx.MockTransport(handler)
+    ) as http:
+        quotes = await YahooSearchProvider(http).fetch_quotes([instrument])
+
+    meta = payload["chart"]["result"][0]["meta"]
+    assert quotes[0].price == Decimal("123.456789")
+    assert quotes[0].as_of == datetime.fromtimestamp(meta["regularMarketTime"], UTC)
+    assert quotes[0].currency is Currency.USD
+    assert quotes[0].provider == "yahoo"
+    assert requests[0].url.path == "/v8/finance/chart/DEMO"
+    assert parse_qs(requests[0].url.query.decode()) == {"interval": ["1m"], "range": ["1d"]}
+
+
+async def test_yahoo_quote_rejects_currency_mismatch() -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+    payload["chart"]["result"][0]["meta"]["currency"] = "HKD"
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+    )
+    instrument = ProviderInstrument(
+        canonical_symbol="DEMO.US",
+        provider_symbol="DEMO",
+        market=Market.US,
+        currency=Currency.USD,
+        asset_type=AssetType.EQUITY,
+    )
+    async with BoundedProviderHttp(allowed_hosts={"query1.finance.yahoo.com"}, transport=transport) as http:
+        with pytest.raises(ProviderFailure) as raised:
+            await YahooSearchProvider(http).fetch_quotes([instrument])
+    assert raised.value.code is ProviderErrorCode.CURRENCY_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("regularMarketPrice", 123.4567891), ("regularMarketTime", 4_102_444_800)]
+)
+async def test_yahoo_quote_rejects_overprecision_or_far_future_values(field: str, value: object) -> None:
+    payload = json.loads(QUOTE_FIXTURE.read_text())
+    payload["chart"]["result"][0]["meta"][field] = value
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+    )
+    instrument = ProviderInstrument(
+        canonical_symbol="DEMO.US",
+        provider_symbol="DEMO",
+        market=Market.US,
+        currency=Currency.USD,
+        asset_type=AssetType.EQUITY,
+    )
+    async with BoundedProviderHttp(allowed_hosts={"query1.finance.yahoo.com"}, transport=transport) as http:
+        with pytest.raises(ProviderFailure) as raised:
+            await YahooSearchProvider(http).fetch_quotes([instrument])
+    assert raised.value.code is ProviderErrorCode.RESPONSE_INVALID

@@ -2,8 +2,10 @@
 
 import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import NoReturn
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from vibe_portfolio.market_data.http import BoundedProviderHttp
 from vibe_portfolio.market_data.models import (
@@ -13,10 +15,12 @@ from vibe_portfolio.market_data.models import (
     ProviderInstrument,
     ProviderQuote,
     ProviderSymbol,
+    validate_quote,
 )
 from vibe_portfolio.portfolio.domain import AssetType, Currency, DomainValidationError, Market, canonical_symbol
 
 _SEARCH_ENDPOINT = "https://query2.finance.yahoo.com/v1/finance/search"
+_QUOTE_ENDPOINT = "https://query1.finance.yahoo.com/v8/finance/chart"
 _US_EXCHANGES = frozenset({"ASE", "BTS", "NCM", "NGM", "NMS", "NYQ", "PCX"})
 _ASSET_TYPES = {"EQUITY": AssetType.EQUITY, "ETF": AssetType.ETF}
 _MAX_SEARCH_ITEMS = 25
@@ -31,6 +35,10 @@ class _MalformedItem(ValueError):
 
 def _invalid_response() -> NoReturn:
     raise ProviderFailure(ProviderErrorCode.SEARCH_RESPONSE_INVALID) from None
+
+
+def _invalid_quote() -> NoReturn:
+    raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID) from None
 
 
 def _validate_request(query: object, limit: object) -> tuple[str, int]:
@@ -133,4 +141,76 @@ class YahooSearchProvider:
         return candidates[:limit]
 
     async def fetch_quotes(self, instruments: Sequence[ProviderInstrument]) -> list[ProviderQuote]:
-        return []
+        quotes: list[ProviderQuote] = []
+        for instrument in instruments:
+            provider_symbol = instrument.provider_symbol
+            if re.fullmatch(r"[A-Z0-9.^=-]{1,20}", provider_symbol) is None:
+                _invalid_quote()
+            parameters = urlencode({"interval": "1m", "range": "1d"})
+            payload = await self._http.get_json(f"{_QUOTE_ENDPOINT}/{quote(provider_symbol, safe='.-^=')}?{parameters}")
+            quote_value = _chart_quote(payload, instrument)
+            if quote_value is not None:
+                quotes.append(quote_value)
+        return quotes
+
+
+def _chart_quote(payload: object, instrument: ProviderInstrument) -> ProviderQuote | None:
+    if type(payload) is not dict:
+        _invalid_quote()
+    chart = payload.get("chart")
+    if type(chart) is not dict or chart.get("error") is not None:
+        _invalid_quote()
+    results = chart.get("result")
+    if results is None:
+        return None
+    if type(results) is not list or len(results) > 1:
+        _invalid_quote()
+    if not results:
+        return None
+    result = results[0]
+    if type(result) is not dict or type(result.get("meta")) is not dict:
+        _invalid_quote()
+    meta = result["meta"]
+    assert isinstance(meta, dict)
+    raw_price = meta.get("regularMarketPrice")
+    raw_timestamp = meta.get("regularMarketTime")
+    raw_currency = meta.get("currency")
+    raw_type = meta.get("instrumentType")
+    raw_symbol = meta.get("symbol")
+    expected_type = {AssetType.EQUITY: "EQUITY", AssetType.ETF: "ETF"}.get(instrument.asset_type)
+    try:
+        if (
+            type(raw_currency) is not str
+            or type(raw_type) is not str
+            or type(raw_symbol) is not str
+            or raw_symbol.upper() != instrument.provider_symbol
+            or raw_type.upper() != expected_type
+            or isinstance(raw_timestamp, bool)
+            or not isinstance(raw_timestamp, int)
+            or isinstance(raw_price, bool)
+            or not isinstance(raw_price, (int, str, Decimal))
+        ):
+            _invalid_quote()
+        try:
+            currency = Currency(raw_currency.upper())
+        except ValueError:
+            _invalid_quote()
+        if currency is not instrument.currency:
+            raise ProviderFailure(ProviderErrorCode.CURRENCY_MISMATCH) from None
+        price = Decimal(str(raw_price))
+        if not price.is_finite() or price <= 0:
+            _invalid_quote()
+        as_of = datetime.fromtimestamp(raw_timestamp, UTC)
+    except ProviderFailure:
+        raise
+    except (InvalidOperation, OSError, OverflowError, TypeError, ValueError):
+        _invalid_quote()
+    quote_value = ProviderQuote(
+        canonical_symbol=instrument.canonical_symbol,
+        provider_symbol=instrument.provider_symbol,
+        price=price,
+        currency=currency,
+        as_of=as_of,
+        provider="yahoo",
+    )
+    return validate_quote(quote_value, instrument, datetime.now(UTC))

@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Generic, Self, TypeAlias, TypeVar
+from typing import Annotated, Generic, Literal, Self, TypeAlias, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer, WithJsonSchema, model_validator
@@ -97,6 +97,30 @@ class InstrumentView(BaseModel):
     asset_type: AssetType
     created_at: datetime
     updated_at: datetime
+
+
+class RefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    instrument_ids: list[UUID] | None = None
+
+
+class RefreshItemView(BaseModel):
+    instrument_id: UUID
+    outcome: Literal["updated", "stale", "unavailable"]
+    provider: str | None
+    error_code: str | None
+
+
+class RefreshRunView(BaseModel):
+    run_id: UUID
+    status: Literal["running", "succeeded", "partial", "failed"]
+    updated: int
+    stale: int
+    unavailable: int
+    providers_used: tuple[str, ...]
+    started_at: datetime
+    finished_at: datetime | None
+    items: list[RefreshItemView]
 
 
 class PositionCreate(BaseModel):
