@@ -37,7 +37,14 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary"],
-      include: ["src/api/client.ts", "src/app/App.tsx", "src/pages/**/*.tsx"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: [
+        "src/main.tsx",
+        "src/api/schema.d.ts",
+        "src/vite-env.d.ts",
+        "src/**/*.test.{ts,tsx}",
+        "src/**/*.types.ts",
+      ],
       thresholds: {
         lines: 80,
         functions: 80,

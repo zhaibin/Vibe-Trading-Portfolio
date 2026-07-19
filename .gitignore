@@ -14,6 +14,7 @@ dist/
 build/
 var/
 frontend/node_modules/
+frontend/tooling/node_modules/
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/

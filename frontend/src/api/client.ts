@@ -1,36 +1,25 @@
 import type { paths } from "./schema";
 
 type PathTemplate = keyof paths & string;
-type ExpandPath<Path extends string> =
-  Path extends `${infer Start}{${string}}${infer Rest}`
-    ? `${Start}${string}${ExpandPath<Rest>}`
-    : Path;
 type MethodPath<Method extends string> = {
   [Path in PathTemplate]: paths[Path] extends Record<Method, infer Operation>
     ? [Operation] extends [never]
       ? never
-      : ExpandPath<Path>
+      : Path
     : never;
 }[PathTemplate];
-type WithQuery<Path extends string> = Path | `${Path}?${string}`;
 
-type GetPath = WithQuery<MethodPath<"get">>;
+type GetPath = MethodPath<"get">;
 type PostPath = MethodPath<"post">;
 type PatchPath = MethodPath<"patch">;
-type ApiRequestPath = WithQuery<ExpandPath<PathTemplate>>;
-type TemplateFor<Path extends string> = {
-  [Template in PathTemplate]: Path extends `${infer Base}?${string}`
-    ? Base extends ExpandPath<Template>
-      ? Template
-      : never
-    : Path extends ExpandPath<Template>
-      ? Template
-      : never;
-}[PathTemplate];
-type OperationFor<Method extends string, Path extends string> =
-  paths[TemplateFor<Path>] extends Record<Method, infer Operation>
+type OperationFor<
+  Method extends string,
+  Path extends string,
+> = Path extends PathTemplate
+  ? paths[Path] extends Record<Method, infer Operation>
     ? Operation
-    : never;
+    : never
+  : never;
 type JsonRequestBody<Operation> = Operation extends {
   requestBody: { content: { "application/json": infer Body } };
 }
@@ -55,7 +44,52 @@ type SuccessfulJson<Operation> = Operation extends {
 type WriteArguments<Operation> = [JsonRequestBody<Operation>] extends [never]
   ? [body: undefined, idempotencyKey: string]
   : [body: JsonRequestBody<Operation>, idempotencyKey: string];
+type ParametersFor<Operation> = Operation extends { parameters: infer Params }
+  ? Params
+  : never;
+type ParameterKind = "path" | "query";
+type PresentParameterKind<Params> = {
+  [Kind in ParameterKind]: Kind extends keyof Params
+    ? [Exclude<Params[Kind], undefined>] extends [never]
+      ? never
+      : Kind
+    : never;
+}[ParameterKind];
+type RequiredParameterKind<Params> = {
+  [Kind in PresentParameterKind<Params>]: Params extends Required<
+    Pick<Params, Kind>
+  >
+    ? Kind
+    : never;
+}[PresentParameterKind<Params>];
+type ParameterGroups<Params> = {
+  [Kind in RequiredParameterKind<Params>]: Exclude<Params[Kind], undefined>;
+} & {
+  [
+    Kind in Exclude<PresentParameterKind<Params>, RequiredParameterKind<Params>>
+  ]?: Exclude<Params[Kind], undefined>;
+};
+type RequestOptions<Operation> = {
+  signal?: AbortSignal;
+} & ([PresentParameterKind<ParametersFor<Operation>>] extends [never]
+  ? { params?: never }
+  : [RequiredParameterKind<ParametersFor<Operation>>] extends [never]
+    ? { params?: ParameterGroups<ParametersFor<Operation>> }
+    : { params: ParameterGroups<ParametersFor<Operation>> });
+type OptionsArguments<Operation> = [
+  RequiredParameterKind<ParametersFor<Operation>>,
+] extends [never]
+  ? [options?: RequestOptions<Operation>]
+  : [options: RequestOptions<Operation>];
 type ErrorFields = Record<string, unknown>;
+
+interface RuntimeOptions {
+  params?: {
+    path?: Record<string, unknown>;
+    query?: Record<string, unknown>;
+  };
+  signal?: AbortSignal;
+}
 
 const invalidJson = Symbol("invalid-json");
 
@@ -108,7 +142,7 @@ export class ApiError extends Error {
 }
 
 async function request<Result>(
-  path: ApiRequestPath,
+  path: string,
   init: RequestInit,
 ): Promise<Result> {
   const headers = new Headers(init.headers);
@@ -134,15 +168,42 @@ async function request<Result>(
   return payload as Result;
 }
 
+function requestPath(template: string, options?: RuntimeOptions): string {
+  const path = template.replace(
+    /\{([^}]+)\}/g,
+    (_placeholder, name: string) => {
+      const value = options?.params?.path?.[name];
+      if (value === undefined || value === null || value === "") {
+        throw new TypeError(`Missing path parameter: ${name}`);
+      }
+      return encodeURIComponent(String(value));
+    },
+  );
+  const query = new URLSearchParams();
+  for (const [name, rawValue] of Object.entries(options?.params?.query ?? {})) {
+    if (rawValue === undefined || rawValue === null) {
+      continue;
+    }
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+    for (const value of values) {
+      query.append(name, String(value));
+    }
+  }
+  const encodedQuery = query.toString();
+  return encodedQuery === "" ? path : `${path}?${encodedQuery}`;
+}
+
 function write<Result>(
   method: "POST" | "PATCH",
-  path: PostPath | PatchPath,
+  path: string,
   body: unknown,
   idempotencyKey: string,
+  options?: RuntimeOptions,
 ): Promise<Result> {
-  return request<Result>(path, {
+  return request<Result>(requestPath(path, options), {
     method,
     body: JSON.stringify(body),
+    signal: options?.signal,
     headers: {
       "Content-Type": "application/json",
       "Idempotency-Key": idempotencyKey,
@@ -154,37 +215,54 @@ export function newIdempotencyKey(): string {
   return `portfolio-${crypto.randomUUID()}`;
 }
 
-function get<Path extends GetPath>(
+async function get<Path extends GetPath>(
   path: Path,
+  ...[options]: OptionsArguments<OperationFor<"get", Path>>
 ): Promise<SuccessfulJson<OperationFor<"get", Path>>> {
-  return request<SuccessfulJson<OperationFor<"get", Path>>>(path, {
-    method: "GET",
-  });
+  return request<SuccessfulJson<OperationFor<"get", Path>>>(
+    requestPath(path, options as RuntimeOptions | undefined),
+    {
+      method: "GET",
+      signal: options?.signal,
+    },
+  );
 }
 
-function post<Path extends PostPath>(
+async function post<Path extends PostPath>(
   path: Path,
-  ...args: WriteArguments<OperationFor<"post", Path>>
+  ...args: [
+    ...WriteArguments<OperationFor<"post", Path>>,
+    ...OptionsArguments<OperationFor<"post", Path>>,
+  ]
 ): Promise<SuccessfulJson<OperationFor<"post", Path>>> {
-  const [body, idempotencyKey] = args;
+  const body = args[0] as unknown;
+  const idempotencyKey = args[1] as string;
+  const options = args[2] as RuntimeOptions | undefined;
   return write<SuccessfulJson<OperationFor<"post", Path>>>(
     "POST",
     path,
     body,
     idempotencyKey,
+    options,
   );
 }
 
-function patch<Path extends PatchPath>(
+async function patch<Path extends PatchPath>(
   path: Path,
-  ...args: WriteArguments<OperationFor<"patch", Path>>
+  ...args: [
+    ...WriteArguments<OperationFor<"patch", Path>>,
+    ...OptionsArguments<OperationFor<"patch", Path>>,
+  ]
 ): Promise<SuccessfulJson<OperationFor<"patch", Path>>> {
-  const [body, idempotencyKey] = args;
+  const body = args[0] as unknown;
+  const idempotencyKey = args[1] as string;
+  const options = args[2] as RuntimeOptions | undefined;
   return write<SuccessfulJson<OperationFor<"patch", Path>>>(
     "PATCH",
     path,
     body,
     idempotencyKey,
+    options,
   );
 }
 
