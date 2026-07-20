@@ -71,6 +71,55 @@ async def test_eastmoney_valid_empty_envelope_is_an_empty_success() -> None:
         assert await EastmoneySearchProvider(http).search("missing", limit=5) == []
 
 
+async def test_eastmoney_accepts_current_exchange_fund_label_as_etf() -> None:
+    payload = {
+        "QuotationCodeTable": {
+            "Data": [
+                {
+                    "Code": "510300",
+                    "Name": "沪深300ETF华泰柏瑞",
+                    "Classify": "Fund",
+                    "SecurityTypeName": "基金",
+                    "SecurityType": "8",
+                    "MktNum": "1",
+                    "QuoteID": "1.510300",
+                }
+            ]
+        }
+    }
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    async with BoundedProviderHttp(allowed_hosts={"searchapi.eastmoney.com"}, transport=transport) as http:
+        candidates = await EastmoneySearchProvider(http).search("510300", limit=5)
+
+    assert len(candidates) == 1
+    assert candidates[0].canonical_symbol == "510300.SH"
+    assert candidates[0].asset_type is AssetType.ETF
+
+
+@pytest.mark.parametrize(("classify", "security_type"), [("Other", "8"), ("Fund", "17")])
+async def test_eastmoney_rejects_unreviewed_current_fund_classification(
+    classify: str, security_type: str
+) -> None:
+    payload = {
+        "QuotationCodeTable": {
+            "Data": [
+                {
+                    "Code": "510300",
+                    "Name": "Unreviewed fund",
+                    "Classify": classify,
+                    "SecurityTypeName": "基金",
+                    "SecurityType": security_type,
+                    "MktNum": "1",
+                    "QuoteID": "1.510300",
+                }
+            ]
+        }
+    }
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    async with BoundedProviderHttp(allowed_hosts={"searchapi.eastmoney.com"}, transport=transport) as http:
+        assert await EastmoneySearchProvider(http).search("510300", limit=5) == []
+
+
 async def test_eastmoney_drops_a_bounded_number_of_malformed_items() -> None:
     valid = json.loads(FIXTURE.read_text())["QuotationCodeTable"]["Data"][0]
     payload = {"QuotationCodeTable": {"Data": [None, valid]}}

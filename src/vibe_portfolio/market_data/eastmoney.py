@@ -100,6 +100,10 @@ def _candidate(value: object) -> InstrumentCandidate | None:
     market_id = _text(value, "MktNum")
     quote_id = _text(value, "QuoteID")
     type_name = _text(value, "SecurityTypeName")
+    if type_name == "基金":
+        if _text(value, "Classify") != "Fund" or _text(value, "SecurityType") != "8":
+            raise _MalformedItem()
+        type_name = "ETF"
     identity = _identity(code, market_id, type_name)
     if identity is None:
         return None

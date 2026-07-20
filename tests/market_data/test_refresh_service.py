@@ -225,11 +225,30 @@ async def test_fixed_routes_and_valid_primary_prevents_fallback(database: Databa
         frozenset({"600000.SH", "000001.SZ"}),
         frozenset({"499991.BJ"}),
     }
-    assert set(yahoo.calls) == {("00700.HK",), ("DEMO.US",)}
+    assert {frozenset(call) for call in yahoo.calls} == {frozenset({"00700.HK", "DEMO.US"})}
     assert tencent.calls == []
     async with database.session() as session:
         run = await session.get(QuoteRefreshRunRow, str(result.run_id))
     assert run is not None and run.scope_json is None
+
+
+async def test_us_route_uses_eastmoney_when_confirmed_candidate_has_no_yahoo_mapping(
+    database: Database,
+) -> None:
+    await seed_active(
+        database,
+        [("AAPL.US", Market.US, Currency.USD, {"eastmoney": "105.AAPL"})],
+    )
+    east, yahoo = FakeProvider("eastmoney"), FakeProvider("yahoo")
+
+    result = await MarketDataService(database, registry(east=east, yahoo=yahoo), now=lambda: NOW).refresh(
+        RefreshScope.all(), "refresh-us-eastmoney-fallback"
+    )
+
+    assert result.status == "succeeded"
+    assert result.updated == 1
+    assert yahoo.calls == []
+    assert east.calls == [("AAPL.US",)]
 
 
 async def test_invalid_primary_falls_back_only_for_that_instrument(database: Database) -> None:

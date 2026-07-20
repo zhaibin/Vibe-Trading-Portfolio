@@ -76,7 +76,7 @@ _ROUTES = {
     Market.CN_SZ: ("eastmoney", "tencent"),
     Market.CN_BJ: ("eastmoney",),
     Market.HK: ("yahoo", "eastmoney"),
-    Market.US: ("yahoo",),
+    Market.US: ("yahoo", "eastmoney"),
 }
 _PUBLIC_PROBE_FIXTURES = ("510300.SH", "00700.HK", "AAPL.US")
 _PUBLIC_PROBE_TIMEOUT_SECONDS = 10.0
