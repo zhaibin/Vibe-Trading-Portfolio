@@ -146,6 +146,7 @@ button:disabled {
 }
 
 .summary-grid,
+.analysis-grid,
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
@@ -154,6 +155,7 @@ button:disabled {
 }
 
 .summary-card,
+.analysis-card,
 .settings-card,
 .refresh-panel,
 .unavailable-summary {
@@ -164,6 +166,7 @@ button:disabled {
 }
 
 .summary-card h3,
+.analysis-card h3,
 .settings-card h2,
 .refresh-panel h2 {
   margin-top: 0;
@@ -173,6 +176,10 @@ button:disabled {
   margin-bottom: 0;
   font-size: 1.15rem;
   font-weight: 650;
+}
+
+.analysis-card p {
+  margin-bottom: 0;
 }
 
 .unavailable-summary {

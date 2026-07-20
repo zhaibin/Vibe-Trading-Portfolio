@@ -51,10 +51,11 @@ describe("SettingsPage", () => {
     expect(screen.getByText("最新报价缓存 2 项")).toBeVisible();
     expect(screen.getByText("候选缓存 3 项")).toBeVisible();
     expect(screen.getByText("var/data")).toBeVisible();
-    expect(screen.getByText("2026-07-20T07:00:00Z")).toHaveAttribute(
-      "datetime",
-      "2026-07-20T07:00:00Z",
+    const backupTime = document.querySelector(
+      'time[datetime="2026-07-20T07:00:00Z"]',
     );
+    expect(backupTime).toHaveAttribute("datetime", "2026-07-20T07:00:00Z");
+    expect(backupTime).not.toHaveTextContent("T");
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/settings/status",
       expect.objectContaining({

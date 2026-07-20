@@ -3,9 +3,14 @@ import type { ReactNode } from "react";
 
 import { settingsQuery } from "../api/queries";
 import { StatusMessage } from "../components/StatusMessage";
+import { formatLocalDateTime } from "../lib/dateTime";
 
 function timestamp(value: string | null): ReactNode {
-  return value === null ? "暂无记录" : <time dateTime={value}>{value}</time>;
+  return value === null ? (
+    "暂无记录"
+  ) : (
+    <time dateTime={value}>{formatLocalDateTime(value)}</time>
+  );
 }
 
 export function SettingsPage() {

@@ -1,4 +1,5 @@
 import type { PortfolioSummary, Position } from "../api/queries";
+import { formatLocalDateTime } from "../lib/dateTime";
 import { formatMoney, formatQuantity, ratioPercent } from "../lib/decimal";
 
 export interface OverviewPosition {
@@ -72,7 +73,7 @@ export function PositionTable({
                     <span>
                       报价{" "}
                       <time dateTime={summary.quote_as_of}>
-                        {summary.quote_as_of}
+                        {formatLocalDateTime(summary.quote_as_of)}
                       </time>
                     </span>
                   )}
@@ -80,7 +81,7 @@ export function PositionTable({
                     <span>
                       获取{" "}
                       <time dateTime={summary.quote_fetched_at}>
-                        {summary.quote_fetched_at}
+                        {formatLocalDateTime(summary.quote_fetched_at)}
                       </time>
                     </span>
                   )}

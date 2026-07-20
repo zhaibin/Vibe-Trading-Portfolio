@@ -14,12 +14,14 @@ import {
 } from "../api/queries";
 import { AllocationBars } from "../components/AllocationBars";
 import { CurrencyTabs } from "../components/CurrencyTabs";
+import { HoldingAnalysis } from "../components/HoldingAnalysis";
 import {
   PositionTable,
   type OverviewPosition,
 } from "../components/PositionTable";
 import { StatusMessage, type Notice } from "../components/StatusMessage";
 import { SummaryCards } from "../components/SummaryCards";
+import { formatLocalDateTime } from "../lib/dateTime";
 
 const CURRENCY_ORDER: Currency[] = ["CNY", "HKD", "USD"];
 const POLL_DELAY_MS = 250;
@@ -271,6 +273,7 @@ export function OverviewPage() {
                 {records.length === summary.data.positions.length &&
                 records.length > 0 ? (
                   <>
+                    <HoldingAnalysis records={records} summary={summary.data} />
                     <AllocationBars
                       currency={activeCurrency}
                       records={records}
@@ -312,7 +315,7 @@ export function OverviewPage() {
                   {settings.data.last_refresh.unavailable}
                 </p>
                 <time dateTime={settings.data.last_refresh.finished_at}>
-                  {settings.data.last_refresh.finished_at}
+                  {formatLocalDateTime(settings.data.last_refresh.finished_at)}
                 </time>
               </section>
             )}

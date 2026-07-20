@@ -290,10 +290,9 @@ describe("OverviewPage", () => {
     });
     expect(summary).toHaveTextContent("部分完成");
     expect(summary).toHaveTextContent("更新 1 · 陈旧 1 · 不可用 1");
-    expect(within(summary).getByText("2026-07-20T01:00:02Z")).toHaveAttribute(
-      "datetime",
-      "2026-07-20T01:00:02Z",
-    );
+    const refreshTime = summary.querySelector("time");
+    expect(refreshTime).toHaveAttribute("datetime", "2026-07-20T01:00:02Z");
+    expect(refreshTime).not.toHaveTextContent("T");
   });
 
   it("keeps currencies independent and explains estimated, stale, unavailable, and zero-cost values", async () => {
@@ -363,10 +362,11 @@ describe("OverviewPage", () => {
     const staleRow = within(details).getByRole("row", { name: /600519\.SH/ });
     expect(staleRow).toHaveTextContent("陈旧");
     expect(staleRow).toHaveTextContent("eastmoney");
-    expect(within(staleRow).getByText("2026-07-19T01:00:00Z")).toHaveAttribute(
-      "datetime",
-      "2026-07-19T01:00:00Z",
+    const quoteTime = staleRow.querySelector(
+      'time[datetime="2026-07-19T01:00:00Z"]',
     );
+    expect(quoteTime).toHaveAttribute("datetime", "2026-07-19T01:00:00Z");
+    expect(quoteTime).not.toHaveTextContent("T");
     expect(
       within(details).getByRole("row", { name: /510300\.SH/ }),
     ).toHaveTextContent("不可用");
@@ -378,6 +378,12 @@ describe("OverviewPage", () => {
     expect(allocation).toHaveTextContent("600519.SH");
     expect(allocation).toHaveTextContent("66.67%");
     expect(allocation).not.toHaveTextContent("510300.SH");
+
+    const analysis = screen.getByRole("region", { name: "持仓分析" });
+    expect(analysis).toHaveTextContent("估值覆盖2 / 3");
+    expect(analysis).toHaveTextContent("盈利 2 · 亏损 0 · 持平 0 · 未估值 1");
+    expect(analysis).toHaveTextContent("最大持仓600519.SH · 66.67%");
+    expect(analysis).toHaveTextContent("新鲜 1 · 陈旧 1 · 不可用 1");
 
     await user.click(within(tabs).getByRole("tab", { name: "USD" }));
     expect(
