@@ -11,12 +11,12 @@ This is dated evidence, not a substitute for live inspection. Follow the startup
 ## Repository state
 
 - Active branch: `codex/portfolio-experience-webui`
-- Verified implementation HEAD before this handoff refresh: `59fa883c74119099f9c3714d0093e836ccfdb54c` (`fix: handle live market provider drift`)
-- Latest milestone commits: `59fa883` live-provider drift fixes, `69e0221` final milestone handoff, `5bcb562` sanitized sdist-to-wheel fix, `eba1548` release/CI/docs, `6cf6b09` production E2E, `518f191` overview/settings
+- Verified implementation HEAD before this handoff refresh: `d67236b` (`fix: format portfolio amounts for display`)
+- Latest milestone commits: `d67236b` display formatting, `a49318b` live-market validation handoff, `59fa883` live-provider drift fixes, `69e0221` final milestone handoff, `5bcb562` sanitized sdist-to-wheel fix
 - All 16 planned tasks and the final packaging correction are committed and review-clean; the subsequent live-provider fixes passed focused and full regression gates
 - Remote: `origin` uses SSH
 - Remote `main` at last query: `c65c0045dc8ff7c75bdacd028581caf0591f905e`
-- Before this handoff refresh, the feature branch was 46 commits ahead and 0 behind `origin/main`; the remote feature branch was at `69e0221`, so the live-provider fix remained to be pushed
+- Before this handoff refresh, the feature branch was 48 commits ahead and 0 behind `origin/main`; the remote feature branch was at `a49318b`, so only the display-formatting commit remained to be pushed
 - Local `main` was at `46f2cf8` and reported four commits ahead of `origin/main`
 - No force-push was performed; publish the named feature branch without rewriting history
 
@@ -27,6 +27,7 @@ This is dated evidence, not a substitute for live inspection. Follow the startup
 - Currency-local CNY/HKD/USD valuation with unknown cash, fresh/stale/unavailable quote states, preserved last-valid quotes, and no cross-currency total.
 - Sidecar-owned reviewed Eastmoney, Yahoo, and Tencent adapters with destination allowlists, response/time/concurrency bounds, search confirmation, route fallback, and no Vibe dependency.
 - Same-origin loopback FastAPI/React WebUI with overview, holdings, settings/status, explicit refresh, keyboard behavior, responsive tables, accessibility checks, and JSON API 404 precedence over SPA fallback.
+- Display-only exact-decimal formatting: money is rounded to two places, percentages to at most two places, and insignificant quantity zeroes are removed without converting persisted/API values through binary floating point.
 - Production-build Playwright coverage using deterministic injected providers, a protected temporary database, process restart/persistence, concurrency conflict recovery, privacy scanning, and signal cleanup.
 - Opt-in public-provider probe limited to `510300.SH`, `00700.HK`, and `AAPL.US`, independently reporting and validating each reviewed provider route.
 - Locked CI frontend/E2E/release workflow with a curated source distribution, wheel-from-sdist build, archive privacy checks, and wheel inclusion of built SPA assets.
@@ -52,7 +53,7 @@ The complete Task 16 gate was run on 2026-07-20:
 - `uv run python scripts/export_openapi.py`: passed.
 - `npm ci --prefix frontend`: passed after managed-cache approval; 381 packages installed, 0 vulnerabilities.
 - `npm --prefix frontend run api:types`: passed; generated OpenAPI/type diff was empty.
-- `npm --prefix frontend run check`: passed; 8 files and 72 tests, 89.56% line coverage, production build successful.
+- Latest `npm --prefix frontend run check`: passed; 9 files and 75 tests, 89.87% line coverage, production build successful.
 - `npm --prefix frontend run e2e`: phase 1 passed in 2.7 seconds and restart phase 2 passed in 784 milliseconds.
 - `uv build --sdist`, followed by `uv build --wheel <sdist>`: built a 156-member curated source archive and a 58-member wheel from that archive.
 - A real uv/Hatch integration regression removes any copied ignored SPA output, synthesizes minimal production-shaped index/hashed CSS/JS assets, and uses a test-owned temporary uv cache to build the wheel directly from a VCS-free source copy and from its generated sdist. Both wheels pass the production artifact verifier and contain exactly one SPA index.
@@ -71,6 +72,7 @@ The approved real-environment validation used only the fixed public instruments 
 - Live testing also found that Yahoo search/quote throttling can leave a confirmed US instrument with only an Eastmoney mapping. Commit `59fa883` adds the already-reviewed Eastmoney adapter as the bounded US fallback after Yahoo.
 - A live refresh initially updated two instruments and marked one unavailable. A later refresh during provider throttling updated one, retained one prior quote as stale, and kept one unavailable; the WebUI correctly excluded the unavailable value and displayed the partial counts rather than reporting a false all-green result.
 - The Settings page showed only the relative database filename, schema/migration health, adapter flags, cache counts, and refresh timestamp. Browser console error/warning capture was empty.
+- After the display-formatting fix, the rebuilt production WebUI was restarted against the same owner-private temporary database. Browser inspection verified `100465.00 CNY` total value, `465.00 CNY` market value, `3.50 CNY` average cost, `32.86%` unrealized return, two-place account cash balances, and quantities without insignificant trailing zeroes.
 
 The temporary data contains no personal holdings and is not tracked by Git. Repeated refreshes were stopped after the providers began throttling, per the data runbook.
 
@@ -99,4 +101,4 @@ Public quote endpoints remain replaceable external dependencies with availabilit
 
 ## Recommended next action
 
-Push the live-provider fix and this handoff refresh to `origin/codex/portfolio-experience-webui` without rewriting history, then use the normal review/merge workflow. Keep this worktree for any remote-review follow-up. Do not begin the formal ledger milestone implicitly.
+Push the display-formatting fix and this handoff refresh to `origin/codex/portfolio-experience-webui` without rewriting history, then use the normal review/merge workflow. Keep this worktree for any remote-review follow-up. Do not begin the formal ledger milestone implicitly.
