@@ -8,12 +8,14 @@ import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select, text
 
 from vibe_portfolio.config import Settings
@@ -76,6 +78,48 @@ _ROUTES = {
     Market.HK: ("yahoo", "eastmoney"),
     Market.US: ("yahoo",),
 }
+_PUBLIC_PROBE_FIXTURES = ("510300.SH", "00700.HK", "AAPL.US")
+_PUBLIC_PROBE_TIMEOUT_SECONDS = 10.0
+_PUBLIC_PROBE_INSTRUMENTS = {
+    "eastmoney": (
+        ProviderInstrument("510300.SH", "1.510300", Market.CN_SH, Currency.CNY, AssetType.ETF),
+        ProviderInstrument("00700.HK", "116.00700", Market.HK, Currency.HKD, AssetType.EQUITY),
+    ),
+    "yahoo": (
+        ProviderInstrument("00700.HK", "0700.HK", Market.HK, Currency.HKD, AssetType.EQUITY),
+        ProviderInstrument("AAPL.US", "AAPL", Market.US, Currency.USD, AssetType.EQUITY),
+    ),
+    "tencent": (
+        ProviderInstrument("510300.SH", "sh510300", Market.CN_SH, Currency.CNY, AssetType.ETF),
+    ),
+}
+
+
+class PublicQuoteEvidence(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    canonical_symbol: str
+    currency: Currency
+    price: Decimal
+    as_of: datetime
+
+
+class PublicProviderProbe(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    provider: str
+    fixtures: tuple[str, ...]
+    passed: bool
+    quotes: tuple[PublicQuoteEvidence, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
+class PublicMarketProbeResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    fixtures: tuple[str, ...]
+    providers: tuple[PublicProviderProbe, ...]
+    passed: bool
 
 
 class SearchValidationError(ValueError):
@@ -156,6 +200,91 @@ class ProviderRegistry:
 
     async def aclose(self) -> None:
         await asyncio.gather(*(transport.aclose() for transport in self._transports))
+
+    async def close(self) -> None:
+        await self.aclose()
+
+    async def probe_public_fixtures(self, fixtures: Sequence[str]) -> PublicMarketProbeResult:
+        reviewed = tuple(fixtures)
+        if reviewed != _PUBLIC_PROBE_FIXTURES:
+            raise ValueError("public probe fixtures must match the reviewed allowlist")
+        reports: list[PublicProviderProbe] = []
+        now = datetime.now(UTC)
+        for provider in self._providers:
+            instruments = _PUBLIC_PROBE_INSTRUMENTS[provider.name]
+            try:
+                values = await asyncio.wait_for(
+                    provider.fetch_quotes(instruments),
+                    timeout=_PUBLIC_PROBE_TIMEOUT_SECONDS,
+                )
+                if type(values) is not list or len(values) != len(instruments):
+                    raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID)
+                expected = {
+                    (instrument.canonical_symbol, instrument.provider_symbol): instrument
+                    for instrument in instruments
+                }
+                evidence: list[PublicQuoteEvidence] = []
+                seen: set[tuple[str, str]] = set()
+                for quote in values:
+                    identity = (quote.canonical_symbol, quote.provider_symbol)
+                    instrument = expected.get(identity)
+                    if instrument is None or identity in seen or quote.provider != provider.name:
+                        raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID)
+                    validated = validate_quote(quote, instrument, now)
+                    if validated.price <= 0:
+                        raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID)
+                    seen.add(identity)
+                    evidence.append(
+                        PublicQuoteEvidence(
+                            canonical_symbol=validated.canonical_symbol,
+                            currency=validated.currency,
+                            price=validated.price,
+                            as_of=validated.as_of,
+                        )
+                    )
+                if seen != set(expected):
+                    raise ProviderFailure(ProviderErrorCode.RESPONSE_INVALID)
+            except TimeoutError:
+                reports.append(
+                    PublicProviderProbe(
+                        provider=provider.name,
+                        fixtures=tuple(item.canonical_symbol for item in instruments),
+                        passed=False,
+                        errors=(ProviderErrorCode.TIMEOUT.value,),
+                    )
+                )
+            except ProviderFailure as error:
+                reports.append(
+                    PublicProviderProbe(
+                        provider=provider.name,
+                        fixtures=tuple(item.canonical_symbol for item in instruments),
+                        passed=False,
+                        errors=(error.code.value,),
+                    )
+                )
+            except Exception:
+                reports.append(
+                    PublicProviderProbe(
+                        provider=provider.name,
+                        fixtures=tuple(item.canonical_symbol for item in instruments),
+                        passed=False,
+                        errors=(ProviderErrorCode.RESPONSE_INVALID.value,),
+                    )
+                )
+            else:
+                reports.append(
+                    PublicProviderProbe(
+                        provider=provider.name,
+                        fixtures=tuple(item.canonical_symbol for item in instruments),
+                        passed=True,
+                        quotes=tuple(evidence),
+                    )
+                )
+        return PublicMarketProbeResult(
+            fixtures=reviewed,
+            providers=tuple(reports),
+            passed=all(item.passed for item in reports),
+        )
 
 
 def build_live_provider_registry(settings: Settings) -> ProviderRegistry:

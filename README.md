@@ -1,14 +1,27 @@
 # Vibe-Trading Portfolio
 
-Independent personal-portfolio Sidecar for [zhaibin/Vibe-Trading](https://github.com/zhaibin/Vibe-Trading). The Sidecar never modifies or imports Vibe-Trading source code.
+Independent personal-portfolio Sidecar for [zhaibin/Vibe-Trading](https://github.com/zhaibin/Vibe-Trading). The Sidecar never modifies or imports Vibe-Trading source code. Experience Milestone 1A provides a local current-position snapshot, currency-local valuation, explicit quote refresh, and a Chinese WebUI; it is not a transaction ledger or trading system.
 
-Milestone 0 proves only the external integration boundary: Vibe version/capability discovery, research-only Sessions, SSE recovery with polling fallback, cancellation, and one operator-approved read-only MCP tool. Ledger, imports, analytics, recommendations, scheduling, and UI arrive in later milestones.
+## Run the local portfolio experience
+
+```bash
+uv sync --frozen --extra dev
+npm ci --prefix frontend
+npm --prefix frontend run build
+uv run portfolio-api
+```
+
+Open <http://127.0.0.1:8765>. The API and WebUI bind to loopback only. There is no login, so do not expose this service through a public interface, reverse proxy, shared tunnel, or non-loopback bind.
+
+Portfolio data is stored by default in `var/data/portfolio.db`; migration backups are stored beside it as `portfolio.db.backup-*.db`. Quote refresh occurs only when you press the refresh control. A stale quote is the last valid quote retained after age or refresh failure; unavailable means no valid quote can value that position. Totals remain separate for CNY, HKD, and USD—there is no FX conversion or cross-currency total.
+
+This milestone stores current accounts and positions only. It has no transaction history, realized-return reconstruction, permanent deletion, broker connection, order placement, or trade execution. Public quote providers can change availability, response shape, rate limits, and usage terms; review those risks before relying on the data. See the [portfolio data runbook](docs/runbooks/portfolio-data.md) for backup, recovery, and provider-failure procedures.
 
 ## New session handoff
 
 Agents and maintainers should start with [`AGENTS.md`](AGENTS.md) and the current [`docs/handoff/CURRENT.md`](docs/handoff/CURRENT.md). A new session must verify the live Git state and report its understanding and recommended next step. Before modifying any repository file or starting milestone work, wait for explicit user approval.
 
-## Local setup
+## Optional Vibe compatibility and MCP setup
 
 ```bash
 uv sync --extra dev
@@ -74,11 +87,19 @@ wrong-name, or unsuccessful tool events fail the test.
 ## Development
 
 ```bash
-uv run ruff check src tests
+uv run ruff check src tests migrations scripts
 uv run mypy src
-uv run pytest -m "not contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
+uv run pytest -m "not contract and not market_contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
 ```
 
 The release policy requires at least 85% line coverage; falling below the threshold is a non-zero gate failure.
+
+The live market-provider smoke test uses only `510300.SH`, `00700.HK`, and `AAPL.US`, and is independently opt-in:
+
+```bash
+PORTFOLIO_RUN_MARKET_CONTRACT=1 uv run pytest tests/contract/test_live_market_data.py -q
+```
+
+Without that exact flag it is skipped/not run, never passed. It contacts public provider endpoints; do not enable it in hermetic or offline testing.
 
 See [the compatibility runbook](docs/runbooks/vibe-compatibility.md) for states, upgrades, token rotation, and failure recovery.

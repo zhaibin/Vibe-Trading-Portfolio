@@ -79,7 +79,7 @@ unknown tool event fails closed.
 The hermetic release suite enforces at least 85% line coverage:
 
 ```bash
-uv run pytest -m "not contract" \
+uv run pytest -m "not contract and not market_contract" \
   --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
 ```
 

@@ -1,162 +1,88 @@
 # Current Project Handoff
 
-**Last updated:** 2026-07-19
+**Last updated:** 2026-07-20
 **Project:** Vibe-Trading Portfolio sidecar
-**Current milestone:** Milestone 0 compatibility foundation completed; Experience Milestone 1A design approved/audited and TDD implementation plan completed; implementation not started
+**Current milestone:** Experience Milestone 1A release candidate implemented and hermetically verified; Task 16 review/commit/integration remains approval-gated
 
 ## Start here
 
-This file is last-known evidence, not a substitute for inspecting the repository. A new session must first follow the startup protocol in [`AGENTS.md`](../../AGENTS.md), compare this handoff with live Git state, and report its understanding and proposed next step. Before modifying any repository file or starting milestone work, wait for explicit user approval.
+This is dated evidence, not a substitute for live inspection. Follow the startup protocol in [`AGENTS.md`](../../AGENTS.md), compare Git state, and obtain explicit approval before modifying repository files or starting another milestone.
 
-## Last-known repository state
+## Repository state
 
-The following state was verified after local stabilization testing on 2026-07-19. It remains last-known evidence rather than a substitute for inspecting the live checkout:
+- Active branch: `codex/portfolio-experience-webui`
+- Verified HEAD before the uncommitted Task 16 release work: `6cf6b09e5c4e426dd600d32b75370dc9be064d90` (`test: cover portfolio experience end to end`)
+- Latest milestone commits: `518f191` overview/settings, `263c5f9` and `14dbf29` holdings hardening, `2460d87` holdings UI, `582e43` typed-shell hardening, `de28a42` typed web shell, `56d8808` and `7edf17f` secure-app hardening, `79d507b` secure same-origin app
+- Task 16 state: uncommitted by explicit instruction; inspect `git status --short` for the complete review set
+- Remote: `origin` uses SSH
+- Remote `main` at last query: `c65c0045dc8ff7c75bdacd028581caf0591f905e`
+- Current feature HEAD was 42 commits ahead and 0 behind `origin/main`; the feature branch has no configured upstream and has not been pushed by this task
+- Local `main` was at `46f2cf8` and reported four commits ahead of `origin/main`
+- No force-push or remote mutation was performed
 
-- Target/integration branch: `main`
-- Last verified active branch: `main`
-- Local stabilization integration: `main` fast-forwarded from `3f3e081` to `96aeb56` after the merged-result gate passed
-- Last verified published head: `c65c004` (`docs: record successful remote publication`)
-- Approved Experience Milestone 1A design: `ee60736` (`docs: design portfolio experience webui`)
-- Design handoff update: `4a58efc` (`docs: record portfolio experience design`)
-- Reviewed TDD implementation plan: `24f253a` (`docs: plan portfolio experience webui`)
-- These Experience Milestone 1A documentation commits are local and have not yet been pushed
-- Live stabilization commits: `c15c12f` (`fix: poll for runtime terminal proof`), `7a26e3a` (`fix: validate goal-aware MCP probe events`), and `ef6938c` (`fix: retry runtime cancel registration race`)
-- Live stabilization design/plan commits: `e1316f7`, `1d207b9`, and `3f3e081`
-- Integrated handoff branch: `docs/new-session-handoff`
-- Handoff branch base: `fb1e81e` (`docs: plan new-session handoff`)
-- Handoff implementation commits: `0bbe561` (`docs: add new-session handoff`) and `16446c3` (`docs: clarify handoff approval gate`)
-- Milestone 0 implementation head: `3b8e502` (`fix: reject pre-open token path replacement`)
-- Handoff design commit: `9d4dfd5` (`docs: design new-session handoff`)
-- Plan commit: `fb1e81e` (`docs: plan new-session handoff`)
-- Remote: `origin` is `git@github.com:zhaibin/Vibe-Trading-Portfolio.git`; local `main` tracks `origin/main`
-- Remote reconciliation: the unrelated `origin/main` initial history was preserved by merging `cab3ffb` (`Initial commit`) as the second parent of `6b1ee52`; its `LICENSE` is now tracked locally. No force-push was used.
-- Remote publication: HTTPS push was rejected because the OAuth token lacked GitHub's `workflow` scope; the already-authenticated SSH transport then advanced remote `main` normally from `cab3ffb` to `6ecf516` without widening token permissions.
-- Upstream Vibe baseline: `0.1.11` at `67a393e4574865e8ab9b1b3f9a9fd1d7ab337343`
-- Supported Vibe range: `>=0.1.11,<0.2.0`
+## Implemented Experience Milestone 1A scope
 
-Always rerun `git status --short --branch`, `git rev-parse HEAD`, `git log --oneline -10`, and `git remote -v`. Report differences before continuing.
-
-## Project objective
-
-Build a personal-holdings module that can use Vibe-Trading's public analysis capabilities without modifying or coupling to Vibe-Trading internals. The sidecar must remain independently upgradeable and fail closed when the external contract cannot be verified.
-
-## Verified completed scope
-
-Milestone 0 established the external integration boundary:
-
-- typed public REST gateway and DTO validation;
-- version, readiness, route, and OpenAPI compatibility negotiation;
-- bounded SSE reconnect/replay with original Session and Attempt polling fallback;
-- authenticated loopback-only read-only Portfolio MCP with manual operator installation;
-- research-only Session coordination with a 4,000-character message ceiling and explicit no-trading instructions;
-- evidence-based MCP probe requiring the exact tool call and successful result;
-- bounded same-Session cancellation retry for Vibe's `attempt.started`/active-loop registration race;
-- strict MCP event validation that permits only correlated successful `get_research_goal`, `add_goal_evidence`, and `update_research_goal_status` control-plane pairs in addition to the one exact Portfolio capability pair;
-- diagnostic system API and machine-readable compatibility CLI;
-- pinned compatibility baseline, minimum/stable/latest CI matrix, layered route/runtime/MCP gates, and an 85% coverage threshold.
-
-The latest hermetic verification on `codex/live-contract-stabilization` reported 139 passed, 3 deselected, 90.42% coverage, clean Ruff, strict mypy, and lock checks. The route-only check reported Vibe `0.1.11`, a compatible contract, and no missing capabilities. The explicit live runtime gate passed in 0.81 seconds, and the explicit operator-configured MCP gate passed in 32.77 seconds. Treat these results as dated evidence and rerun the gates before relying on them after any change.
-
-## Explicitly not implemented
-
-- holdings ledger and transaction model;
-- CSV, broker, or manual holdings import;
-- valuation, cost basis, performance, exposure, concentration, or risk analytics;
-- portfolio-aware Vibe context assembly beyond the compatibility probe;
-- recommendation workflows, scheduling, alerts, or UI;
-- broker connectivity, order placement, trade execution, or any write action.
-
-Do not describe the project as having a usable personal portfolio module yet.
-
-The approved next milestone is now specified, but none of its runtime capability is implemented. In particular, the repository still has no React WebUI, accounts/positions database, independent instrument search, quote refresh, valuation summary, frontend test suite, or portfolio migrations.
+- Owner-private SQLite storage with versioned migrations, integrity/path checks, bounded busy behavior, pre-migration backups, and retention.
+- Exact accounts, confirmed instruments, current positions, archive/restore, idempotency, optimistic concurrency, pagination, and sanitized versioned APIs.
+- Currency-local CNY/HKD/USD valuation with unknown cash, fresh/stale/unavailable quote states, preserved last-valid quotes, and no cross-currency total.
+- Sidecar-owned reviewed Eastmoney, Yahoo, and Tencent adapters with destination allowlists, response/time/concurrency bounds, search confirmation, route fallback, and no Vibe dependency.
+- Same-origin loopback FastAPI/React WebUI with overview, holdings, settings/status, explicit refresh, keyboard behavior, responsive tables, accessibility checks, and JSON API 404 precedence over SPA fallback.
+- Production-build Playwright coverage using deterministic injected providers, a protected temporary database, process restart/persistence, concurrency conflict recovery, privacy scanning, and signal cleanup.
+- Opt-in public-provider probe limited to `510300.SH`, `00700.HK`, and `AAPL.US`, independently reporting and validating each reviewed provider route.
+- Locked CI frontend/E2E/release workflow with a curated source distribution, wheel-from-sdist build, archive privacy checks, and wheel inclusion of built SPA assets.
 
 ## Hard boundaries
 
-- `/Users/zhaibin/Dev/AInvest` is the separate upstream Vibe checkout and must not be modified by sidecar work.
-- Use only public REST, OpenAPI, SSE, and operator-installed MCP.
-- Never use Vibe internal imports, shared private storage, runtime patches, Session `mcpServers`, or `ALLOW_SESSION_MCP_SERVERS=1`.
-- Keep MCP on `127.0.0.1`, bearer-authenticated, owner-secret protected, read-only, and explicitly allowlisted.
-- Never persist secrets or personal holdings in this handoff.
-- Unknown versions, missing or malformed routes, readiness failures, incomplete terminal states, and unverifiable MCP events remain fail-closed.
-- Analysis prompts must continue to prohibit order placement, broker writes, and trade execution.
+- The sidecar remains independent of Vibe internals, databases, private files, and runtime patches. It integrates only through public REST/OpenAPI/SSE and operator-installed read-only MCP.
+- Never set `ALLOW_SESSION_MCP_SERVERS=1` or send Session `mcpServers` overrides.
+- MCP remains loopback-only, bearer-authenticated, read-only, and explicitly allowlisted.
+- There is no broker write, order placement, trade execution, transaction reconstruction, or instruction implying those capabilities.
+- The WebUI has no login and must remain loopback-only. Do not expose it through a public bind, proxy, or tunnel.
+- Tokens, keys, account identifiers, holdings, balances, and database contents must stay out of Git and handoff documents.
+
+## Fresh hermetic release evidence
+
+The complete Task 16 gate was run on 2026-07-20:
+
+- `uv sync --frozen --extra dev`: passed after managed-cache approval.
+- `uv lock --check`: passed; 111 packages resolved.
+- `uv run ruff check src tests migrations scripts`: passed.
+- `uv run mypy src`: passed; 48 source files clean under strict mypy.
+- `uv run pytest -m "not contract and not market_contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85`: 610 passed, 4 deselected, 87.05% coverage.
+- `uv run python scripts/export_openapi.py`: passed.
+- `npm ci --prefix frontend`: passed after managed-cache approval; 381 packages installed, 0 vulnerabilities.
+- `npm --prefix frontend run api:types`: passed; generated OpenAPI/type diff was empty.
+- `npm --prefix frontend run check`: passed; 8 files and 72 tests, 89.56% line coverage, production build successful.
+- `npm --prefix frontend run e2e`: phase 1 passed in 2.9 seconds and restart phase 2 passed in 951 milliseconds.
+- `uv build --sdist`, followed by `uv build --wheel <sdist>`: built a 156-member curated source archive and a 58-member wheel from that archive.
+- The release verifier requires the exact Python/frontend build manifests and source, migration, script, runbook, test, frontend source, and E2E trees; it rejects local/generated artifacts, unsafe or duplicate-normalized archive members, ZIP links/special modes, personal home paths, and common concrete secret/token forms. The sanitized artifacts had zero personal home-path matches.
+- Separate wheel assertions found exactly one `vibe_portfolio/web/dist/index.html`, one hashed CSS asset, and one hashed JavaScript asset.
+
+The first non-escalated uv and npm-cache attempts failed at managed cache permissions before their payloads ran. Approved retries above are the actual successful gate evidence. Two dependency deprecation warnings remain upstream (`httpx`/Starlette TestClient and Authlib jose); they did not fail the suite.
+
+## Opt-in external gate status
+
+- Public market-provider gate: **not run**. Default test invocation reported one skip with `PORTFOLIO_RUN_MARKET_CONTRACT=1 is not set; market contract not run`.
+- Vibe route contract: **not run**.
+- Vibe runtime contract: **not run**.
+- Operator MCP probe: **not run**.
+
+No opt-in flag was set by Task 16. Skipped/not configured layers are not represented as passed. Follow [`docs/runbooks/vibe-compatibility.md`](../runbooks/vibe-compatibility.md) and [`docs/runbooks/portfolio-data.md`](../runbooks/portfolio-data.md) before explicitly enabling an external gate.
+
+## Remaining scope and risks
+
+Experience Milestone 1A remains a staged current-position snapshot, not the umbrella design's immutable-ledger MVP. Formal ledger events, transaction history, CSV import, realized performance, FX consolidation, research automation, restore UI, permanent deletion, remote authentication, scheduling, alerts, broker connectivity, and trading remain deliberately out of scope.
+
+Public quote endpoints remain replaceable external dependencies with availability, response-shape, rate-limit, and usage-condition risk. A passed hermetic suite does not prove current live-provider availability.
 
 ## Authoritative references
 
-- [Product design](../superpowers/specs/2026-07-18-personal-portfolio-sidecar-design.md)
-- [Experience Milestone 1A WebUI and independent market data design](../superpowers/specs/2026-07-19-portfolio-experience-webui-design.md)
-- [Experience Milestone 1A TDD implementation plan](../superpowers/plans/2026-07-19-portfolio-experience-webui.md)
-- [Milestone 0 implementation plan](../superpowers/plans/2026-07-18-vibe-compatibility-spike.md)
-- [New-session handoff design](../superpowers/specs/2026-07-19-new-session-handoff-design.md)
-- [Live-contract stabilization design](../superpowers/specs/2026-07-19-live-contract-stabilization-design.md)
-- [Live-contract stabilization implementation plan](../superpowers/plans/2026-07-19-live-contract-stabilization.md)
-- [Compatibility runbook](../runbooks/vibe-compatibility.md)
-- [Pinned compatibility baseline](../../compatibility/baseline.json)
-- [Operator setup and development commands](../../README.md)
+- [Experience design](../superpowers/specs/2026-07-19-portfolio-experience-webui-design.md)
+- [Experience implementation plan](../superpowers/plans/2026-07-19-portfolio-experience-webui.md)
+- [Portfolio data runbook](../runbooks/portfolio-data.md)
+- [Vibe compatibility runbook](../runbooks/vibe-compatibility.md)
+- [Pinned upstream contract](../../compatibility/baseline.json)
 
-## Verification commands
+## Recommended next action
 
-```bash
-uv sync --frozen --extra dev
-uv lock --check
-uv run ruff check src tests
-uv run mypy src
-uv run pytest -m "not contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
-```
-
-The route-only, live runtime, and full MCP commands are intentionally documented in the [compatibility runbook](../runbooks/vibe-compatibility.md). Omitted opt-in flags mean skipped/not run, not passed. The runtime and MCP gates may contact a configured provider or consume model budget.
-
-## Local integration evidence
-
-- AInvest is running from the separate read-only `/Users/zhaibin/Dev/AInvest` checkout on `127.0.0.1:8899`; no AInvest source was changed.
-- The isolated AInvest Python 3.11 environment is `/tmp/vibe-trading-portfolio-ainvest-venv311`. Its locked install required preinstalling `mini-racer==0.14.1` because the upstream requirements lock omitted the `mini-racer>=0.12.4` dependency required by pinned AkShare.
-- The Sidecar API is listening on `127.0.0.1:8765`; it intentionally has no `/health` route. The Sidecar MCP server is listening on bearer-authenticated `127.0.0.1:8766/mcp`.
-- The generated operator bundle remains under ignored `var/install`. The existing Vibe operator configuration backup is `/Users/zhaibin/.vibe-trading/agent.json.codex-backup-20260719-portfolio-mcp`. No token value is recorded here.
-- A diagnostic test reproduced the runtime race: initial cancel returned `no_active_loop` at 0.007 seconds, while a retry for the same Session returned `cancelled` at 0.264 seconds. This evidence motivated the final same-Session retry fix.
-
-## Current decisions and risks
-
-- The sidecar preserves the former unrelated remote initial commit and `LICENSE` through merge commit `6b1ee52`. Future pushes can use normal fast-forward semantics; force-push remains unnecessary.
-- Vibe compatibility is intentionally limited to `>=0.1.11,<0.2.0`; widening it requires updated fixtures and passing layered gates.
-- Live runtime and MCP results are explicit dated local evidence, not a substitute for rerunning them after dependency, provider, operator configuration, or upstream changes.
-- Experience Milestone 1A is an explicitly staged current-position snapshot experience, not the umbrella design's formal immutable-ledger MVP. It uses one fixed currency per account and never emits a cross-currency total.
-- Market search and quotes will be implemented inside the Sidecar through isolated provider adapters; they will not depend on Vibe-Trading or import AInvest internals. Quotes refresh only on explicit user action, and failed refreshes preserve and visibly mark the last valid quote as stale.
-- The first WebUI is a same-origin React/TypeScript SPA served by FastAPI on loopback. It has no login; Host/Origin/Fetch Metadata/CSP controls are mandatory compensations, and non-loopback deployment remains blocked.
-- Public quote endpoints remain replaceable external dependencies with availability and usage-condition risk. Default tests must use fakes; real-provider smoke tests are opt-in and skipped means not run.
-- Snapshot holdings cannot provide transaction-derived cost basis, realized returns, or reconciled performance. A future ledger migration must create explicit opening events with provenance and must not invent transaction history.
-- The implementation plan is a single ordered 16-task plan because persistence, market data, and WebUI share one contract and are not independently releasable. It uses router factories and independently injected database/portfolio/market services to avoid circular imports and preserve diagnostic-only tests.
-- Frontend dependencies were resolved against the npm registry on 2026-07-19 and will be pinned by `package-lock.json`; CI standardizes on Node 24 even though the current workstation reports Node 26.5.0.
-
-## Current blockers
-
-Current code/test blockers: none known. The written Experience Milestone 1A specification has been approved, and its implementation plan has completed specification-coverage, placeholder, type/interface, packaging, security, and execution-path self-review. Runtime capability remains unchanged until plan execution begins.
-
-## Recommended next step
-
-Choose the plan execution workflow: recommended subagent-driven execution with a fresh worker and two-stage review per task, or inline execution in this task with checkpointed batches. Then execute the [Experience Milestone 1A plan](../superpowers/plans/2026-07-19-portfolio-experience-webui.md) from Task 1 without skipping RED/GREEN evidence.
-
-## Latest design verification
-
-- The new specification was checked with `git diff --cached --check`; no whitespace errors remained before commit.
-- Its relative links to the umbrella design and current handoff resolve locally.
-- A live CodeGraph audit confirmed that the current FastAPI app has three compatibility operations composed in `create_app`; the new design preserves their semantics while intentionally replacing the old exact-total-route test with a scoped compatibility-route invariant.
-- The audit records 15 resolved findings and six accepted residual risks, including the snapshot-versus-ledger staging boundary, loopback no-auth limitation, quote-provider instability, and non-calendar-aware freshness rule.
-- No Python, frontend, live-provider, Vibe runtime, or MCP test gate was rerun because this change is documentation-only. The previously recorded test results remain dated evidence, not fresh verification.
-
-## Latest plan verification
-
-- The implementation plan contains 16 sequential tasks, 16 file/interface sections, and 16 planned commits across 1,477 lines.
-- Every task includes explicit RED and GREEN commands; the plan has a specification-coverage map and no unassigned Experience Milestone 1A requirement.
-- Placeholder/ambiguous-instruction and credential-pattern scans returned no matches; all 86 Markdown fence lines are balanced.
-- `git diff --cached --check` passed before commit `24f253a`.
-- Planning review corrected package-relative SPA assets, localhost/127.0.0.1 Origin handling, the zero-body MCP probe exception, Decimal JSON decoding, provider rate bounds, Beijing symbol identity, retained idempotency keys, candidate trust, retention, and a real two-process E2E restart.
-- No source, lockfile, migration, generated frontend, runtime data, or test behavior changed, so implementation gates were not rerun.
-
-## End-of-session update checklist
-
-- Reconcile this document with live branch, HEAD, recent commits, and remotes.
-- Move work to completed only after recording fresh verification evidence.
-- Update implemented and explicitly unimplemented scope.
-- Record approved decisions, blockers, risks, and external dependencies without secrets.
-- Replace the recommended next step with the next approval-gated action.
-- Keep detailed setup and compatibility procedures in README/runbooks; link instead of duplicating them.
-- Review the diff for personal holdings, account data, tokens, keys, and unsupported live-pass claims before committing.
+Review the uncommitted Task 16 probe, CI/package metadata, documentation, boundary scans, and this evidence. With explicit approval, create the final milestone commit, integrate the reviewed 16-task branch, rerun the merged-result release gate, and publish through normal fast-forward semantics. Do not begin the formal ledger milestone implicitly.

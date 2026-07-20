@@ -17,6 +17,34 @@ jobs:
           python-version: "3.11"
           enable-cache: true
       - run: uv sync --frozen --extra dev
-      - run: uv run ruff check src tests
+      - run: uv run ruff check src tests migrations scripts
       - run: uv run mypy src
-      - run: uv run pytest -m "not contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
+      - run: uv run pytest -m "not contract and not market_contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: uv sync --frozen --extra dev
+      - run: npm ci --prefix frontend
+      - run: uv run python scripts/export_openapi.py
+      - run: npm --prefix frontend run api:types
+      - run: git diff --exit-code -- frontend/openapi.json frontend/src/api/schema.d.ts
+      - run: npm --prefix frontend run check
+      - run: npm exec --prefix frontend -- playwright install --with-deps chromium
+      - run: npm --prefix frontend run e2e
+      - run: uv build --sdist
+      - run: uv build --wheel dist/vibe_trading_portfolio-*.tar.gz
+      - run: unzip -Z1 dist/vibe_trading_portfolio-*.whl | rg -x 'vibe_portfolio/web/dist/index\.html'
+      - run: unzip -Z1 dist/vibe_trading_portfolio-*.whl | rg -x 'vibe_portfolio/web/dist/assets/[^/]+-[0-9a-f]{8,}\.css'
+      - run: unzip -Z1 dist/vibe_trading_portfolio-*.whl | rg -x 'vibe_portfolio/web/dist/assets/[^/]+-[0-9a-f]{8,}\.js'
+      - run: uv run python scripts/verify_release_artifacts.py dist/vibe_trading_portfolio-*.tar.gz dist/vibe_trading_portfolio-*.whl

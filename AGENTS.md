@@ -56,7 +56,7 @@ uv sync --frozen --extra dev
 uv lock --check
 uv run ruff check src tests
 uv run mypy src
-uv run pytest -m "not contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
+uv run pytest -m "not contract and not market_contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85
 ```
 
 Follow [`docs/runbooks/vibe-compatibility.md`](docs/runbooks/vibe-compatibility.md) for opt-in route, runtime, and MCP contract gates.

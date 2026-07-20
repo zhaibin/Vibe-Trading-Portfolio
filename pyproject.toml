@@ -41,12 +41,59 @@ portfolio-compat-check = "vibe_portfolio.cli.compatibility:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/vibe_portfolio"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/vibe_portfolio/web/dist" = "vibe_portfolio/web/dist"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.env.example",
+  "/.github/workflows",
+  "/LICENSE",
+  "/README.md",
+  "/alembic.ini",
+  "/compatibility",
+  "/docs",
+  "/frontend",
+  "/migrations",
+  "/pyproject.toml",
+  "/scripts",
+  "/src",
+  "/tests",
+  "/uv.lock",
+]
+exclude = [
+  "/.coverage",
+  "/.superpowers",
+  "/dist",
+  "/var",
+  "/frontend/coverage",
+  "/frontend/node_modules",
+  "/frontend/playwright-report",
+  "/frontend/test-results",
+  "/docs/superpowers",
+  "**/.DS_Store",
+  "**/.mypy_cache",
+  "**/.pytest_cache",
+  "**/.ruff_cache",
+  "**/__pycache__",
+  "**/*.log",
+  "**/*.py[cod]",
+]
+artifacts = [
+  "/src/vibe_portfolio/web/dist",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"frontend/tooling/eslint.config.js" = "frontend/tooling/eslint.config.js"
+"frontend/tooling/package.json" = "frontend/tooling/package.json"
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
   "contract: opt-in tests against a running Vibe-Trading instance",
+  "market_contract: opt-in tests against reviewed public market-data fixtures",
 ]
 
 [tool.ruff]
