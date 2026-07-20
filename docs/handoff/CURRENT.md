@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-20
 **Project:** Vibe-Trading Portfolio sidecar
-**Current milestone:** Experience Milestone 1A implemented, independently reviewed, and hermetically verified; remote publication is the next action
+**Current milestone:** Experience Milestone 1A implemented, reviewed, hermetically verified, and exercised against live public market providers
 
 ## Start here
 
@@ -11,12 +11,12 @@ This is dated evidence, not a substitute for live inspection. Follow the startup
 ## Repository state
 
 - Active branch: `codex/portfolio-experience-webui`
-- Verified implementation HEAD before this handoff refresh: `5bcb562f8ddc990c8c5d3af3ebf39b229f3a8bd1` (`fix: build wheel from sanitized source archive`)
-- Latest milestone commits: `5bcb562` sanitized sdist-to-wheel fix, `eba1548` release/CI/docs, `6cf6b09` production E2E, `518f191` overview/settings, `263c5f9` and `14dbf29` holdings hardening, `2460d87` holdings UI
-- All 16 planned tasks and the final packaging correction are committed; whole-branch review found no remaining P1/P2 issues
+- Verified implementation HEAD before this handoff refresh: `59fa883c74119099f9c3714d0093e836ccfdb54c` (`fix: handle live market provider drift`)
+- Latest milestone commits: `59fa883` live-provider drift fixes, `69e0221` final milestone handoff, `5bcb562` sanitized sdist-to-wheel fix, `eba1548` release/CI/docs, `6cf6b09` production E2E, `518f191` overview/settings
+- All 16 planned tasks and the final packaging correction are committed and review-clean; the subsequent live-provider fixes passed focused and full regression gates
 - Remote: `origin` uses SSH
 - Remote `main` at last query: `c65c0045dc8ff7c75bdacd028581caf0591f905e`
-- Before this handoff-only commit, the feature branch was 44 commits ahead and 0 behind `origin/main`; it had no configured upstream and had not yet been pushed
+- Before this handoff refresh, the feature branch was 46 commits ahead and 0 behind `origin/main`; the remote feature branch was at `69e0221`, so the live-provider fix remained to be pushed
 - Local `main` was at `46f2cf8` and reported four commits ahead of `origin/main`
 - No force-push was performed; publish the named feature branch without rewriting history
 
@@ -48,7 +48,7 @@ The complete Task 16 gate was run on 2026-07-20:
 - `uv lock --check`: passed; 111 packages resolved.
 - `uv run ruff check src tests migrations scripts`: passed.
 - `uv run mypy src`: passed; 48 source files clean under strict mypy.
-- Latest full hermetic pytest gate: 649 passed, 4 deselected, 87.05% coverage, including all 39 packaging tests and real direct/generated-sdist Hatch builds.
+- Latest full hermetic pytest gate after the live-provider fixes: 653 passed, 4 deselected, 87.11% coverage, including all 39 packaging tests and real direct/generated-sdist Hatch builds.
 - `uv run python scripts/export_openapi.py`: passed.
 - `npm ci --prefix frontend`: passed after managed-cache approval; 381 packages installed, 0 vulnerabilities.
 - `npm --prefix frontend run api:types`: passed; generated OpenAPI/type diff was empty.
@@ -61,14 +61,27 @@ The complete Task 16 gate was run on 2026-07-20:
 
 The first non-escalated uv and npm-cache attempts failed at managed cache permissions before their payloads ran. Approved retries above are the actual successful gate evidence. Two dependency deprecation warnings remain upstream (`httpx`/Starlette TestClient and Authlib jose); they did not fail the suite.
 
+## Live public-market evidence
+
+The approved real-environment validation used only the fixed public instruments `510300.SH`, `00700.HK`, and `AAPL.US` with an owner-private temporary database:
+
+- `PORTFOLIO_RUN_MARKET_CONTRACT=1 uv run pytest tests/contract/test_live_market_data.py -q -rA`: passed, 1 test in 6.00 seconds.
+- The production WebUI created CNY/HKD/USD test accounts, searched and explicitly confirmed all three public instruments, created positions, preserved them across two clean service restarts, and did not refresh on page load.
+- Live testing found Eastmoney's current exchange-fund search label changed from `ETF` to `基金`. Commit `59fa883` accepts only the reviewed `Classify=Fund` and `SecurityType=8` shape and keeps other classifications fail-closed.
+- Live testing also found that Yahoo search/quote throttling can leave a confirmed US instrument with only an Eastmoney mapping. Commit `59fa883` adds the already-reviewed Eastmoney adapter as the bounded US fallback after Yahoo.
+- A live refresh initially updated two instruments and marked one unavailable. A later refresh during provider throttling updated one, retained one prior quote as stale, and kept one unavailable; the WebUI correctly excluded the unavailable value and displayed the partial counts rather than reporting a false all-green result.
+- The Settings page showed only the relative database filename, schema/migration health, adapter flags, cache counts, and refresh timestamp. Browser console error/warning capture was empty.
+
+The temporary data contains no personal holdings and is not tracked by Git. Repeated refreshes were stopped after the providers began throttling, per the data runbook.
+
 ## Opt-in external gate status
 
-- Public market-provider gate: **not run**. Default test invocation reported one skip with `PORTFOLIO_RUN_MARKET_CONTRACT=1 is not set; market contract not run`.
+- Public market-provider gate: **passed** for the fixed public fixtures on 2026-07-20; later interactive requests experienced external throttling and correctly degraded to partial/stale/unavailable states.
 - Vibe route contract: **not run**.
 - Vibe runtime contract: **not run**.
 - Operator MCP probe: **not run**.
 
-No opt-in flag was set by Task 16. Skipped/not configured layers are not represented as passed. Follow [`docs/runbooks/vibe-compatibility.md`](../runbooks/vibe-compatibility.md) and [`docs/runbooks/portfolio-data.md`](../runbooks/portfolio-data.md) before explicitly enabling an external gate.
+Only `PORTFOLIO_RUN_MARKET_CONTRACT=1` was set for the explicit public-fixture command. The other skipped/not configured layers are not represented as passed. Follow [`docs/runbooks/vibe-compatibility.md`](../runbooks/vibe-compatibility.md) and [`docs/runbooks/portfolio-data.md`](../runbooks/portfolio-data.md) before explicitly enabling an external gate.
 
 ## Remaining scope and risks
 
@@ -86,4 +99,4 @@ Public quote endpoints remain replaceable external dependencies with availabilit
 
 ## Recommended next action
 
-Push `codex/portfolio-experience-webui` to `origin` without rewriting history, then use the normal review/merge workflow. Keep this worktree for any remote-review follow-up. Do not begin the formal ledger milestone implicitly.
+Push the live-provider fix and this handoff refresh to `origin/codex/portfolio-experience-webui` without rewriting history, then use the normal review/merge workflow. Keep this worktree for any remote-review follow-up. Do not begin the formal ledger milestone implicitly.
