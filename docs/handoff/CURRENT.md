@@ -48,13 +48,14 @@ The complete Task 16 gate was run on 2026-07-20:
 - `uv lock --check`: passed; 111 packages resolved.
 - `uv run ruff check src tests migrations scripts`: passed.
 - `uv run mypy src`: passed; 48 source files clean under strict mypy.
-- `uv run pytest -m "not contract and not market_contract" --cov=vibe_portfolio --cov-report=term-missing --cov-fail-under=85`: 610 passed, 4 deselected, 87.05% coverage.
+- Latest full hermetic pytest gate: 648 passed, 4 deselected, 87.05% coverage; the subsequent packaging-only gate passed all 39 tests, including real direct and generated-sdist Hatch builds.
 - `uv run python scripts/export_openapi.py`: passed.
 - `npm ci --prefix frontend`: passed after managed-cache approval; 381 packages installed, 0 vulnerabilities.
 - `npm --prefix frontend run api:types`: passed; generated OpenAPI/type diff was empty.
 - `npm --prefix frontend run check`: passed; 8 files and 72 tests, 89.56% line coverage, production build successful.
 - `npm --prefix frontend run e2e`: phase 1 passed in 2.9 seconds and restart phase 2 passed in 951 milliseconds.
 - `uv build --sdist`, followed by `uv build --wheel <sdist>`: built a 156-member curated source archive and a 58-member wheel from that archive.
+- A real uv/Hatch integration regression removes any copied ignored SPA output, synthesizes minimal production-shaped index/hashed CSS/JS assets, and uses a test-owned temporary uv cache to build the wheel directly from a VCS-free source copy and from its generated sdist. Both wheels pass the production artifact verifier and contain exactly one SPA index.
 - The release verifier requires the exact Python/frontend build manifests and source, migration, script, runbook, test, frontend source, and E2E trees; it rejects local/generated artifacts, unsafe or duplicate-normalized archive members, ZIP links/special modes, personal home paths, and common concrete secret/token forms. The sanitized artifacts had zero personal home-path matches.
 - Separate wheel assertions found exactly one `vibe_portfolio/web/dist/index.html`, one hashed CSS asset, and one hashed JavaScript asset.
 

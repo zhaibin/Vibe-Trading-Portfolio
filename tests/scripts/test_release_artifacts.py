@@ -1,5 +1,8 @@
 import io
+import os
+import shutil
 import stat
+import subprocess
 import sys
 import tarfile
 import warnings
@@ -38,6 +41,7 @@ REQUIRED_SDIST_PREFIX_FILES = {
     "tests/test_config.py": b"def test_config(): pass\n",
 }
 CURATED_SDIST_FILES = REQUIRED_SDIST_FILES | REQUIRED_SDIST_PREFIX_FILES
+REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
 def _write_sdist(path: Path, files: dict[str, bytes]) -> None:
@@ -52,6 +56,56 @@ def _write_wheel(path: Path, files: dict[str, bytes]) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         for name, payload in files.items():
             archive.writestr(name, payload)
+
+
+def _run_uv_build(cache: Path, *args: str) -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required for packaging integration tests")
+    environment = os.environ.copy()
+    environment["UV_CACHE_DIR"] = str(cache)
+    result = subprocess.run([uv, "build", *args], check=False, capture_output=True, text=True, env=environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _assert_single_spa_index(directory: Path) -> None:
+    wheel = next(directory.glob("*.whl"))
+    verify_wheel(wheel)
+    with zipfile.ZipFile(wheel) as archive:
+        assert archive.namelist().count("vibe_portfolio/web/dist/index.html") == 1
+
+
+def _synthesize_spa(project: Path) -> None:
+    spa = project / "src/vibe_portfolio/web/dist"
+    if spa.exists():
+        shutil.rmtree(spa)
+    assets = spa / "assets"
+    assets.mkdir(parents=True)
+    (spa / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (assets / "index-0123456789abcdef.css").write_text("body{}\n", encoding="utf-8")
+    (assets / "index-fedcba9876543210.js").write_text("export{}\n", encoding="utf-8")
+
+
+def test_hatch_builds_single_spa_directly_and_from_generated_sdist(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(
+        REPOSITORY_ROOT,
+        project,
+        ignore=shutil.ignore_patterns(".git", ".venv", ".worktrees", "node_modules", "coverage", "var"),
+    )
+    _synthesize_spa(project)
+    direct = tmp_path / "direct"
+    source = tmp_path / "source"
+    rebuilt = tmp_path / "rebuilt"
+    cache = tmp_path / "uv-cache"
+
+    _run_uv_build(cache, "--wheel", "--out-dir", str(direct), str(project))
+    _assert_single_spa_index(direct)
+
+    _run_uv_build(cache, "--sdist", "--out-dir", str(source), str(project))
+    sdist = next(source.glob("*.tar.gz"))
+    _run_uv_build(cache, "--wheel", "--out-dir", str(rebuilt), str(sdist))
+    _assert_single_spa_index(rebuilt)
 
 
 def test_verify_sdist_accepts_curated_source_archive(tmp_path: Path) -> None:
