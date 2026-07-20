@@ -14,6 +14,7 @@
   "scripts": {
     "api:types": "npm run api:types --workspace @vibe-portfolio/tooling",
     "build": "tsc -b && vite build",
+    "e2e": "uv run python ../scripts/run_e2e.py",
     "format:check": "prettier --check .",
     "lint": "npm run lint --workspace @vibe-portfolio/tooling",
     "test": "vitest run",
@@ -28,6 +29,8 @@
     "react-router-dom": "7.18.1"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.61.1",
     "@testing-library/dom": "10.4.1",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.2",

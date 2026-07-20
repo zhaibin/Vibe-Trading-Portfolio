@@ -1,4 +1,6 @@
 coverage/
 node_modules/
 openapi.json
+playwright-report/
 src/api/schema.d.ts
+test-results/
