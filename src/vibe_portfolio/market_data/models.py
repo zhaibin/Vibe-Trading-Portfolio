@@ -90,6 +90,35 @@ class RefreshResult:
     unavailable: int
 
 
+@dataclass(frozen=True, slots=True)
+class AdapterStatus:
+    name: str
+    enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RefreshStatus:
+    status: Literal["succeeded", "partial", "failed"]
+    updated: int
+    stale: int
+    unavailable: int
+    finished_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsStatus:
+    schema_revision: str
+    migration_healthy: bool
+    database_path: str
+    backup_directory: str
+    latest_backup_at: datetime | None
+    adapters: tuple[AdapterStatus, ...]
+    last_successful_refresh_at: datetime | None
+    last_refresh: RefreshStatus | None
+    latest_quote_count: int
+    candidate_cache_count: int
+
+
 def validate_quote(quote: ProviderQuote, instrument: ProviderInstrument, now: datetime) -> ProviderQuote:
     """Return a quote only when it exactly matches a valid requested instrument."""
     try:

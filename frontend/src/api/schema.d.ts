@@ -159,6 +159,23 @@ export interface paths {
         patch: operations["update_position_api_v1_positions__position_id__patch"];
         trace?: never;
     };
+    "/api/v1/settings/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Settings Status */
+        get: operations["settings_status_api_v1_settings_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/system/compatibility": {
         parameters: {
             query?: never;
@@ -256,6 +273,13 @@ export interface components {
             updated_at: string;
             /** Version */
             version: number;
+        };
+        /** AdapterStatusView */
+        AdapterStatusView: {
+            /** Enabled */
+            enabled: boolean;
+            /** Name */
+            name: string;
         };
         /**
          * AnalysisMode
@@ -582,6 +606,47 @@ export interface components {
             unavailable: number;
             /** Updated */
             updated: number;
+        };
+        /** RefreshStatusView */
+        RefreshStatusView: {
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Stale */
+            stale: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "succeeded" | "partial" | "failed";
+            /** Unavailable */
+            unavailable: number;
+            /** Updated */
+            updated: number;
+        };
+        /** SettingsStatusView */
+        SettingsStatusView: {
+            /** Adapters */
+            adapters: components["schemas"]["AdapterStatusView"][];
+            /** Backup Directory */
+            backup_directory: string;
+            /** Candidate Cache Count */
+            candidate_cache_count: number;
+            /** Database Path */
+            database_path: string;
+            last_refresh: components["schemas"]["RefreshStatusView"] | null;
+            /** Last Successful Refresh At */
+            last_successful_refresh_at: string | null;
+            /** Latest Backup At */
+            latest_backup_at: string | null;
+            /** Latest Quote Count */
+            latest_quote_count: number;
+            /** Migration Healthy */
+            migration_healthy: boolean;
+            /** Schema Revision */
+            schema_revision: string;
         };
         /** SummaryPosition */
         SummaryPosition: {
@@ -1071,6 +1136,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    settings_status_api_v1_settings_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsStatusView"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
         };

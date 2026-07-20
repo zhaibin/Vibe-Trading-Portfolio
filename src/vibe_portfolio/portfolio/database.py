@@ -367,6 +367,7 @@ class Database:
     def __init__(self, path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> None:
         self.path = path
         self.busy_timeout_ms = busy_timeout_ms
+        self.schema_revision: str | None = None
         self.engine: AsyncEngine | None = None
         self._sessions: async_sessionmaker[AsyncSession] | None = None
         self._lifecycle_lock = asyncio.Lock()
@@ -378,7 +379,9 @@ class Database:
             sessions: async_sessionmaker[AsyncSession] | None = None
             try:
                 validate_database_path(self.path)
-                await _run_to_terminal(asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms))
+                upgrade = await _run_to_terminal(
+                    asyncio.to_thread(upgrade_database, self.path, self.busy_timeout_ms)
+                )
                 candidate = create_async_engine(
                     sqlite_async_url(self.path),
                     pool_pre_ping=True,
@@ -412,6 +415,7 @@ class Database:
             assert sessions is not None
             self.engine = candidate
             self._sessions = sessions
+            self.schema_revision = upgrade.revision
 
     async def close(self) -> None:
         async with self._lifecycle_lock:
@@ -421,6 +425,7 @@ class Database:
         engine = self.engine
         self.engine = None
         self._sessions = None
+        self.schema_revision = None
         if engine is not None:
             await _dispose_engine(engine)
 

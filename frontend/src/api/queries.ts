@@ -8,13 +8,35 @@ export type Currency = components["schemas"]["Currency"];
 export type Instrument = components["schemas"]["InstrumentView"];
 export type InstrumentCandidate = components["schemas"]["InstrumentSearchView"];
 export type Position = components["schemas"]["PositionView"];
+export type PortfolioSummary = components["schemas"]["PortfolioSummary"];
+export type RefreshRun = components["schemas"]["RefreshRunView"];
+export type SettingsStatus = components["schemas"]["SettingsStatusView"];
 
 export const holdingsKeys = {
   accounts: ["accounts"] as const,
   accountList: (archived: boolean) => ["accounts", { archived }] as const,
   positions: (archived: boolean) => ["positions", { archived }] as const,
   summary: (currency: Currency) => ["summary", currency] as const,
+  settings: ["settings"] as const,
 };
+
+export function summaryQuery(currency: Currency) {
+  return queryOptions({
+    queryKey: holdingsKeys.summary(currency),
+    queryFn: ({ signal }) =>
+      api.get("/api/v1/portfolio/summary", {
+        params: { query: { currency } },
+        signal,
+      }),
+  });
+}
+
+export function settingsQuery() {
+  return queryOptions({
+    queryKey: holdingsKeys.settings,
+    queryFn: ({ signal }) => api.get("/api/v1/settings/status", { signal }),
+  });
+}
 
 export function accountsQuery(archived = false) {
   return queryOptions({

@@ -3,19 +3,24 @@
 import asyncio
 import json
 import re
+import stat
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, cast
 from uuid import UUID, uuid4
+
+from sqlalchemy import func, select, text
 
 from vibe_portfolio.config import Settings
 from vibe_portfolio.market_data.eastmoney import EastmoneySearchProvider
 from vibe_portfolio.market_data.http import BoundedProviderHttp
 from vibe_portfolio.market_data.models import (
+    AdapterStatus,
     InstrumentCandidate,
     ProviderErrorCode,
     ProviderFailure,
@@ -24,6 +29,8 @@ from vibe_portfolio.market_data.models import (
     ProviderSymbol,
     RefreshResult,
     RefreshScope,
+    RefreshStatus,
+    SettingsStatus,
     validate_quote,
 )
 from vibe_portfolio.market_data.protocol import MarketDataProvider
@@ -38,7 +45,12 @@ from vibe_portfolio.portfolio.repository import (
     RefreshInstrumentRecord,
     RefreshItemInput,
 )
-from vibe_portfolio.portfolio.tables import QuoteRefreshItemRow, QuoteRefreshRunRow
+from vibe_portfolio.portfolio.tables import (
+    InstrumentCandidateRow,
+    LatestQuoteRow,
+    QuoteRefreshItemRow,
+    QuoteRefreshRunRow,
+)
 
 _WHITESPACE = re.compile(r"\s+")
 _ALLOWED_PUNCTUATION = frozenset(" .-&/")
@@ -324,6 +336,7 @@ class MarketDataService:
         self._repository = repository or PortfolioRepository()
         self._settings = settings or Settings()
         self._now = now or (lambda: datetime.now(UTC))
+        self._enabled_provider_names = frozenset(names)
 
     async def startup(self) -> None:
         now = self._aware_now()
@@ -534,6 +547,70 @@ class MarketDataService:
                 raise RefreshRunNotFound()
             items = await self._repository.refresh_items(session, str(run_id))
             return RefreshRunDetails(run=run, items=tuple(items))
+
+    async def settings_status(self) -> SettingsStatus:
+        async with self._database.session() as session:
+            revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
+            latest_quote_count = await session.scalar(select(func.count()).select_from(LatestQuoteRow))
+            candidate_cache_count = await session.scalar(
+                select(func.count()).select_from(InstrumentCandidateRow)
+            )
+            last_successful_refresh_at = await session.scalar(
+                select(func.max(QuoteRefreshRunRow.finished_at)).where(
+                    QuoteRefreshRunRow.status.in_(("completed", "partial")),
+                    QuoteRefreshRunRow.finished_at.is_not(None),
+                )
+            )
+            latest_refresh = await session.scalar(
+                select(QuoteRefreshRunRow)
+                .where(
+                    QuoteRefreshRunRow.status != "running",
+                    QuoteRefreshRunRow.finished_at.is_not(None),
+                )
+                .order_by(
+                    QuoteRefreshRunRow.finished_at.desc(),
+                    QuoteRefreshRunRow.id.desc(),
+                )
+                .limit(1)
+            )
+        configured_path = self._settings.database_path
+        display_path = configured_path.as_posix() if not configured_path.is_absolute() else configured_path.name
+        display_parent = Path(display_path).parent.as_posix()
+        backup_times: list[datetime] = []
+        for backup in self._database.path.parent.glob(f"{self._database.path.name}.backup-*.db"):
+            try:
+                metadata = backup.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                backup_times.append(datetime.fromtimestamp(metadata.st_mtime, UTC))
+        expected_revision = self._database.schema_revision
+        return SettingsStatus(
+            schema_revision=revision if isinstance(revision, str) else "unknown",
+            migration_healthy=isinstance(revision, str) and revision == expected_revision,
+            database_path=display_path,
+            backup_directory=display_parent,
+            latest_backup_at=max(backup_times, default=None),
+            adapters=tuple(
+                AdapterStatus(name=name, enabled=name in self._enabled_provider_names)
+                for name in _PROVIDER_PRIORITY
+            ),
+            last_successful_refresh_at=last_successful_refresh_at,
+            last_refresh=None
+            if latest_refresh is None or latest_refresh.finished_at is None
+            else RefreshStatus(
+                status=cast(
+                    Literal["succeeded", "partial", "failed"],
+                    "succeeded" if latest_refresh.status == "completed" else latest_refresh.status,
+                ),
+                updated=latest_refresh.updated_count,
+                stale=latest_refresh.stale_count,
+                unavailable=latest_refresh.unavailable_count,
+                finished_at=latest_refresh.finished_at,
+            ),
+            latest_quote_count=latest_quote_count or 0,
+            candidate_cache_count=candidate_cache_count or 0,
+        )
 
     def _validate_refresh_input(self, scope: RefreshScope, key: str) -> list[str] | None:
         if not isinstance(scope, RefreshScope) or _IDEMPOTENCY_KEY.fullmatch(key) is None:

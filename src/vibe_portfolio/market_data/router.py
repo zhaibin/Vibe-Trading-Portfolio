@@ -1,7 +1,8 @@
 """Injected FastAPI router for bounded search and explicit quote refresh."""
 
 import re
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Header
@@ -34,6 +35,32 @@ class InstrumentSearchView(BaseModel):
     currency: Currency
     asset_type: AssetType
     sources: tuple[str, ...]
+
+
+class AdapterStatusView(BaseModel):
+    name: str
+    enabled: bool
+
+
+class RefreshStatusView(BaseModel):
+    status: Literal["succeeded", "partial", "failed"]
+    updated: int
+    stale: int
+    unavailable: int
+    finished_at: datetime
+
+
+class SettingsStatusView(BaseModel):
+    schema_revision: str
+    migration_healthy: bool
+    database_path: str
+    backup_directory: str
+    latest_backup_at: datetime | None
+    adapters: tuple[AdapterStatusView, ...]
+    last_successful_refresh_at: datetime | None
+    last_refresh: RefreshStatusView | None
+    latest_quote_count: int
+    candidate_cache_count: int
 
 
 def _view(candidate: InstrumentCandidate) -> InstrumentSearchView:
@@ -76,6 +103,21 @@ def _refresh_view(details: RefreshRunDetails) -> RefreshRunView:
 
 def build_market_data_router(service: MarketDataService) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["market-data"], route_class=PortfolioRoute)
+
+    @router.get(
+        "/settings/status",
+        response_model=SettingsStatusView,
+        responses={503: {"model": ErrorEnvelope}},
+    )
+    async def settings_status() -> object:
+        try:
+            return await service.settings_status()
+        except DatabaseBusyError:
+            return api_error("DATABASE_BUSY", 503)
+        except DatabaseStartupError:
+            return api_error("PORTFOLIO_UNAVAILABLE", 500)
+        except Exception:
+            return api_error("PORTFOLIO_UNAVAILABLE", 500)
 
     @router.get(
         "/instruments/search",
