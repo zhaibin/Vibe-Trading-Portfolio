@@ -12,6 +12,7 @@ import {
 import { AccountForm } from "../components/AccountForm";
 import { PositionEditForm, PositionForm } from "../components/PositionForm";
 import { type Notice, StatusMessage } from "../components/StatusMessage";
+import { formatMoney, formatQuantity } from "../lib/decimal";
 
 interface PendingSubmission {
   signature: string;
@@ -123,7 +124,7 @@ function AccountRecord({
       <span>
         {account.cash_balance === null
           ? "现金余额未知"
-          : `现金余额 ${account.cash_balance}`}
+          : `现金余额 ${formatMoney(account.cash_balance, account.currency)}`}
       </span>
       <div className="record-actions">
         <button
@@ -403,9 +404,9 @@ function PositionRecord({
       <h3>
         {position.instrument.name} {position.instrument.canonical_symbol}
       </h3>
-      <strong>数量 {position.quantity}</strong>
+      <strong>数量 {formatQuantity(position.quantity)}</strong>
       <span>
-        平均成本 {position.average_cost} {account.currency}
+        平均成本 {formatMoney(position.average_cost, account.currency)}
       </span>
       {position.note === null ? null : <span>{position.note}</span>}
       {archived ? (

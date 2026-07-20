@@ -1,5 +1,5 @@
 import type { PortfolioSummary } from "../api/queries";
-import { ratioPercent } from "../lib/decimal";
+import { formatMoney, ratioPercent } from "../lib/decimal";
 
 export function SummaryCards({ summary }: { summary: PortfolioSummary }) {
   const currency = summary.currency;
@@ -9,7 +9,7 @@ export function SummaryCards({ summary }: { summary: PortfolioSummary }) {
         {summary.estimated ? "估算总资产" : "总资产"}
       </h2>
       <p className="headline-value">
-        {summary.total_value} {currency}
+        {formatMoney(summary.total_value, currency)}
       </p>
       {summary.estimated ? (
         <p>包含陈旧行情或未知项目，未估值持仓不计入总资产。</p>
@@ -17,27 +17,19 @@ export function SummaryCards({ summary }: { summary: PortfolioSummary }) {
       <div className="summary-grid">
         <article className="summary-card">
           <h3>持仓市值</h3>
-          <p>
-            {summary.market_value} {currency}
-          </p>
+          <p>{formatMoney(summary.market_value, currency)}</p>
         </article>
         <article className="summary-card">
           <h3>持仓成本</h3>
-          <p>
-            {summary.position_cost} {currency}
-          </p>
+          <p>{formatMoney(summary.position_cost, currency)}</p>
         </article>
         <article className="summary-card">
           <h3>已知现金</h3>
-          <p>
-            {summary.known_cash} {currency}
-          </p>
+          <p>{formatMoney(summary.known_cash, currency)}</p>
         </article>
         <article className="summary-card">
           <h3>未实现盈亏</h3>
-          <p>
-            {summary.unrealized_pnl} {currency}
-          </p>
+          <p>{formatMoney(summary.unrealized_pnl, currency)}</p>
           {summary.unrealized_pnl_pct === null ? null : (
             <p>{ratioPercent(summary.unrealized_pnl_pct)}</p>
           )}
@@ -49,9 +41,7 @@ export function SummaryCards({ summary }: { summary: PortfolioSummary }) {
       {summary.unvalued_count > 0 ? (
         <div className="unavailable-summary">
           <strong>{summary.unvalued_count} 项未估值</strong>
-          <span>
-            未估值成本 {summary.unvalued_cost} {currency}
-          </span>
+          <span>未估值成本 {formatMoney(summary.unvalued_cost, currency)}</span>
         </div>
       ) : null}
     </section>

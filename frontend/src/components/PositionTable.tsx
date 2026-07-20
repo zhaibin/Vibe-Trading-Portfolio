@@ -1,5 +1,5 @@
 import type { PortfolioSummary, Position } from "../api/queries";
-import { ratioPercent } from "../lib/decimal";
+import { formatMoney, formatQuantity, ratioPercent } from "../lib/decimal";
 
 export interface OverviewPosition {
   position: Position;
@@ -41,17 +41,22 @@ export function PositionTable({
                   <span>{position.instrument.name}</span>
                 </th>
                 <td>
-                  {summary.quantity} · {summary.average_cost} {currency}
+                  {formatQuantity(summary.quantity)} ·{" "}
+                  {formatMoney(summary.average_cost, currency)}
                 </td>
                 <td>
                   {summary.quote_price === null
                     ? "暂无报价"
-                    : `${summary.quote_price} / ${summary.market_value} ${currency}`}
+                    : `${formatMoney(summary.quote_price, currency)} / ${
+                        summary.market_value === null
+                          ? "暂无市值"
+                          : formatMoney(summary.market_value, currency)
+                      }`}
                 </td>
                 <td>
                   {summary.unrealized_pnl === null
                     ? "未估值"
-                    : `${summary.unrealized_pnl} ${currency}`}
+                    : formatMoney(summary.unrealized_pnl, currency)}
                   {summary.unrealized_pnl_pct === null ? null : (
                     <span> {ratioPercent(summary.unrealized_pnl_pct)}</span>
                   )}

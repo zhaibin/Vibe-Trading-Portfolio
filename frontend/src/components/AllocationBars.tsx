@@ -1,5 +1,5 @@
 import type { OverviewPosition } from "./PositionTable";
-import { ratioPercent } from "../lib/decimal";
+import { formatMoney, ratioPercent } from "../lib/decimal";
 
 export function AllocationBars({
   currency,
@@ -43,7 +43,9 @@ export function AllocationBars({
               <th scope="row">{position.instrument.canonical_symbol}</th>
               <td>{ratioPercent(summary.allocation ?? "0")}</td>
               <td>
-                {summary.market_value} {currency}
+                {summary.market_value === null
+                  ? "未估值"
+                  : formatMoney(summary.market_value, currency)}
               </td>
             </tr>
           ))}

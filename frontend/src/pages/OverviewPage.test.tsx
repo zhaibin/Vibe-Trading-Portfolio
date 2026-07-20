@@ -357,7 +357,7 @@ describe("OverviewPage", () => {
     ).toBeVisible();
     expect(screen.getByText("1 个账户现金未知")).toBeVisible();
     expect(screen.getByText("1 项未估值")).toBeVisible();
-    expect(screen.getByText("未估值成本 40 CNY")).toBeVisible();
+    expect(screen.getByText("未估值成本 40.00 CNY")).toBeVisible();
 
     const details = screen.getByRole("table", { name: "持仓估值明细" });
     const staleRow = within(details).getByRole("row", { name: /600519\.SH/ });
@@ -371,20 +371,20 @@ describe("OverviewPage", () => {
       within(details).getByRole("row", { name: /510300\.SH/ }),
     ).toHaveTextContent("不可用");
     const zeroCost = within(details).getByRole("row", { name: /000001\.SZ/ });
-    expect(zeroCost).toHaveTextContent("50 CNY");
+    expect(zeroCost).toHaveTextContent("50.00 CNY");
     expect(zeroCost).not.toHaveTextContent("%");
 
     const allocation = screen.getByRole("table", { name: "持仓配置" });
     expect(allocation).toHaveTextContent("600519.SH");
-    expect(allocation).toHaveTextContent("66.6666%");
+    expect(allocation).toHaveTextContent("66.67%");
     expect(allocation).not.toHaveTextContent("510300.SH");
 
     await user.click(within(tabs).getByRole("tab", { name: "USD" }));
     expect(
       await screen.findByRole("heading", { name: "总资产" }),
     ).toBeVisible();
-    expect(screen.getAllByText("25 USD")[0]).toBeVisible();
-    expect(screen.queryByText("150 CNY")).not.toBeInTheDocument();
+    expect(screen.getAllByText("25.00 USD")[0]).toBeVisible();
+    expect(screen.queryByText("150.00 CNY")).not.toBeInTheDocument();
   });
 
   it("starts refresh only on demand, reports partial completion, and focuses status", async () => {
@@ -415,7 +415,7 @@ describe("OverviewPage", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     renderOverview();
-    expect((await screen.findAllByText("150 CNY"))[0]).toBeVisible();
+    expect((await screen.findAllByText("150.00 CNY"))[0]).toBeVisible();
     expect(
       fetchMock.mock.calls.filter(([input]) =>
         String(input).endsWith("/refresh"),
@@ -480,7 +480,7 @@ describe("OverviewPage", () => {
     );
     const user = userEvent.setup();
     renderOverview();
-    expect((await screen.findAllByText("150 CNY"))[0]).toBeVisible();
+    expect((await screen.findAllByText("150.00 CNY"))[0]).toBeVisible();
     await user.click(screen.getByRole("button", { name: "刷新行情" }));
     expect(await screen.findByText("行情刷新完成")).toBeVisible();
     expect(polls).toBe(2);
@@ -538,7 +538,7 @@ describe("OverviewPage", () => {
       }),
     );
     renderOverview();
-    expect((await screen.findAllByText("150 CNY"))[0]).toBeVisible();
+    expect((await screen.findAllByText("150.00 CNY"))[0]).toBeVisible();
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole("button", { name: "刷新行情" }));
     await act(async () => {
@@ -581,7 +581,7 @@ describe("OverviewPage", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     renderOverview();
-    expect((await screen.findAllByText("150 CNY"))[0]).toBeVisible();
+    expect((await screen.findAllByText("150.00 CNY"))[0]).toBeVisible();
     await user.click(screen.getByRole("button", { name: "刷新行情" }));
     await screen.findByText("暂时无法刷新行情，请重试");
     await user.click(screen.getByRole("button", { name: "刷新行情" }));
